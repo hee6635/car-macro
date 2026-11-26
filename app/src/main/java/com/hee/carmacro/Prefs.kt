@@ -153,9 +153,21 @@ class Prefs(context: Context) {
         get() = b("login_warned")
         set(v) = putB("login_warned", v)
 
-    var widgetPreset: Int
-        get() = sp.getInt("widget_preset", 2)
-        set(v) = sp.edit().putInt("widget_preset", v).apply()
+    /** 최근 실행 기록 (최신 20건): [{"t":ms,"src":"앱 동작","title":"✅ …","msg":"…"}] */
+    fun history(): List<JSONObject> = try {
+        val a = org.json.JSONArray(s("history", "[]"))
+        (0 until a.length()).map { a.getJSONObject(it) }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    @Synchronized
+    fun addHistory(source: String, title: String, msg: String) {
+        val list = listOf(JSONObject().apply {
+            put("t", System.currentTimeMillis()); put("src", source); put("title", title); put("msg", msg)
+        }) + history()
+        put("history", org.json.JSONArray(list.take(20)).toString())
+    }
 
     var lastResult: String
         get() = s("last_result", "아직 실행한 명령이 없어요")

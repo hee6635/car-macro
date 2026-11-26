@@ -7,7 +7,6 @@ import android.app.AlertDialog
 import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.ComponentName
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
@@ -47,14 +46,8 @@ class MainActivity : Activity() {
 
     // 리모컨
     private lateinit var pixelText: TextView
-    private lateinit var doorStateText: TextView
-    private lateinit var doorMain: Button
-    private lateinit var doorAlt: Button
-    private lateinit var engineStateText: TextView
-    private lateinit var engineRunningBox: LinearLayout
-    private lateinit var engineIdleBox: LinearLayout
-    private lateinit var engineCountdown: TextView
-    private lateinit var lastResultText: TextView
+    private lateinit var carText: TextView
+    private lateinit var historyText: TextView
 
     // 수신기
     private lateinit var receiverStatus: TextView
@@ -140,21 +133,6 @@ class MainActivity : Activity() {
         addView(it)
     }
 
-    /** 실수 방지용 길게 누르기 버튼 */
-    private fun holdButton(parent: LinearLayout, label: String, color: Int, height: Int, action: () -> Unit) =
-        Button(this).also { b ->
-            b.text = label; b.isAllCaps = false; b.textSize = 18f; b.setTextColor(Color.WHITE)
-            b.background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(color) }
-            b.setOnClickListener { toast("길게 눌러야 실행돼요") }
-            b.setOnLongClickListener { action(); true }
-            parent.addView(b, LinearLayout.LayoutParams(MATCH_PARENT, dp(height)).apply { topMargin = dp(8) })
-        }
-
-    private fun tapButton(parent: LinearLayout, label: String, action: () -> Unit) = Button(this).also { b ->
-        b.text = label; b.isAllCaps = false; b.setOnClickListener { action() }
-        parent.addView(b, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(4) })
-    }
-
     // ───────────────────────── 화면 구성 ─────────────────────────
 
     @SuppressLint("SetTextI18n")
@@ -202,47 +180,30 @@ class MainActivity : Activity() {
     }
 
     private fun buildSender(b: LinearLayout) {
-        b.addView(TextView(this).apply { text = "쏘렌토"; textSize = 26f; setTypeface(null, Typeface.BOLD) })
+        b.addView(TextView(this).apply { text = "차량 매크로"; textSize = 26f; setTypeface(null, Typeface.BOLD) })
+        b.note("루틴 자동화용 앱이에요. 직접 누를 때는 기아 앱 위젯을 쓰세요.")
 
-        val pixelCard = card(b)
-        pixelText = pixelCard.text()
+        b.title("픽셀1")
+        pixelText = card(b).text()
 
-        val doorCard = card(b)
-        doorStateText = doorCard.text(size = 15f)
-        doorMain = holdButton(doorCard, "문 열기", Color.parseColor("#2E7D5B"), 84) { send(Prefs.CMD_UNLOCK) }
-        doorAlt = tapButton(doorCard, "문 잠그기") { send(Prefs.CMD_LOCK) }
+        b.title("차 상태")
+        carText = card(b, Color.parseColor("#FBF1EA")).text()
 
-        val engineCard = card(b, Color.parseColor("#FBF1EA"))
-        engineStateText = engineCard.text(size = 15f)
-        engineRunningBox = box().also { engineCard.addView(it) }
-        engineCountdown = TextView(this).apply { textSize = 34f; setTypeface(null, Typeface.BOLD) }
-        engineRunningBox.addView(engineCountdown)
-        tapButton(engineRunningBox, "시동 끄기") { send(Prefs.CMD_STOP) }
-        engineIdleBox = box().also { engineCard.addView(it) }
-        holdButton(engineIdleBox, "시동 · 한파", Color.parseColor("#B23A3A"), 56) { send(Prefs.CMD_START1) }
-        holdButton(engineIdleBox, "시동 · 난방", Color.parseColor("#C76A1E"), 56) { send(Prefs.CMD_START2) }
-        holdButton(engineIdleBox, "시동 · 냉방", Color.parseColor("#2F6FB0"), 56) { send(Prefs.CMD_START3) }
-        holdButton(engineIdleBox, "시동 · 최대 난방", Color.parseColor("#7A2E2E"), 56) { send(Prefs.CMD_START_MAX) }
-        tapButton(engineIdleBox, "시동 끄기 (상태와 상관없이)") { send(Prefs.CMD_STOP) }
-        engineCard.note("프리셋 내용(온도·열선·유지 시간)은 픽셀1 앱에서 정해요.")
+        b.title("최근 실행 기록")
+        historyText = card(b).text(size = 13f)
 
-        lastResultText = b.text(size = 13f).apply { setPadding(0, dp(10), 0, 0) }
+        b.title("앱 동작 (루틴·빅스비용)")
+        b.note("갤럭시 루틴 → 동작 추가 → 앱 동작 실행 → 차량 매크로 에서 고르세요.\n" +
+            "• 차 문 열기 (폰 잠금이 풀려 있어야 실행)\n• 차 문 잠그기\n" +
+            "• 차 시동 · 한파 / 난방 / 냉방 / 최대 난방\n• 차 시동 끄기\n" +
+            "• 퇴근 신호 (진동만, 차 명령 없음 → 루틴 조건 '앱이 열렸을 때'용)\n" +
+            "프리셋 내용(온도·열선·유지 시간)은 픽셀1 앱에서 정해요.")
 
-        b.title("위젯 · 실행 아이콘")
-        b.note("• 위젯: 홈 화면 길게 누르기 → 위젯 → '차량 매크로'. 문 열기·시동은 두 번 눌러야 실행돼요.\n" +
-            "• 실행 아이콘: 앱 목록의 '차 문 열기', '차 시동 · 난방', '퇴근 신호' 등을 갤럭시 루틴 '앱 열기'나 빅스비 빠른 명령어에서 고르세요.\n" +
-            "• '차 문 열기'는 폰 잠금이 풀려 있어야 실행돼요. 시동은 잠긴 상태에서도 돼요.")
-        b.note("\n위젯 시동 버튼에 쓸 프리셋")
-        val sp = Spinner(this)
-        sp.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("한파", "난방", "냉방"))
-        sp.setSelection(prefs.widgetPreset - 1)
-        sp.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                if (prefs.widgetPreset != pos + 1) { prefs.widgetPreset = pos + 1; CarWidget.updateAll(this@MainActivity, null) }
-            }
-            override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
-        }
-        b.addView(sp)
+        b.title("테스트 실행")
+        b.note("루틴을 만들 때 확인용이에요. 실제로 차가 움직여요.")
+        b.row("문 열기" to { confirmSend(Prefs.CMD_UNLOCK) }, "문 잠그기" to { confirmSend(Prefs.CMD_LOCK) })
+        b.row("시동·한파" to { confirmSend(Prefs.CMD_START1) }, "시동·난방" to { confirmSend(Prefs.CMD_START2) }, "시동·냉방" to { confirmSend(Prefs.CMD_START3) })
+        b.row("최대 난방" to { confirmSend(Prefs.CMD_START_MAX) }, "시동 끄기" to { confirmSend(Prefs.CMD_STOP) })
     }
 
     private fun buildReceiver(b: LinearLayout) {
@@ -359,49 +320,34 @@ class MainActivity : Activity() {
                 append(if (prefs.pixelWarned) "⚠️ 픽셀1 연결 끊김" else "🟢 픽셀1 정상")
                 append(" · ${ago(t)} 신호\n")
                 val bat = d.optInt("battery", -1)
-                append("배터리 ${if (bat >= 0) "$bat%" else "?"}${if (d.optBoolean("charging")) " · 충전 중" else " · 충전 안 됨"}")
+                append("배터리 ${if (bat >= 0) "$bat%" else "?"}${if (d.optBoolean("charging")) " · 충전 중" else " · ⚠️ 충전 안 됨"}")
                 append(" · ${if (d.optBoolean("wifi")) "Wi-Fi" else "모바일 데이터"}\n")
                 append("기아 앱 ${when (d.optString("kia")) { "ok" -> "로그인 됨"; "logout" -> "⚠️ 로그아웃됨"; else -> "점검 전" }}")
                 if (!d.optBoolean("a11y", true)) append(" · ⚠️ 접근성 꺼짐")
             }
         }
-
-        val lock = CarWidget.doorShowsLock(prefs)
-        doorStateText.text = "문 · " + when (prefs.door) {
-            "locked" -> "잠김"; "unlocked" -> "열림"; else -> "상태 모름"
-        } + if (prefs.doorTime > 0) " (${ago(prefs.doorTime)} 기준)" else ""
-        if (lock) {
-            doorMain.text = "문 잠그기"
-            (doorMain.background as GradientDrawable).setColor(Color.parseColor("#455A64"))
-            doorMain.setOnClickListener { send(Prefs.CMD_LOCK) }   // 잠그기는 짧게 눌러도 실행
-            doorAlt.text = "문 열기 (길게 누르기)"
-            doorAlt.setOnClickListener { toast("길게 눌러야 실행돼요") }
-            doorAlt.setOnLongClickListener { send(Prefs.CMD_UNLOCK); true }
-        } else {
-            doorMain.text = "문 열기\n길게 눌러 실행"
-            (doorMain.background as GradientDrawable).setColor(Color.parseColor("#2E7D5B"))
-            doorMain.setOnClickListener { toast("길게 눌러야 실행돼요") }
-            doorAlt.text = "문 잠그기"
-            doorAlt.setOnClickListener { send(Prefs.CMD_LOCK) }
-            doorAlt.setOnLongClickListener { send(Prefs.CMD_LOCK); true }
-        }
         refreshEngine()
-        lastResultText.text = "마지막: ${prefs.lastResult}"
+        val h = prefs.history()
+        val fmt = java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.KOREA)
+        historyText.text = if (h.isEmpty()) "아직 실행한 명령이 없어요" else h.joinToString("\n\n") { e ->
+            "${fmt.format(java.util.Date(e.optLong("t")))} · ${e.optString("src")}\n${e.optString("title")}\n${e.optString("msg")}"
+        }
     }
 
+    /** 차 상태 (1초마다 갱신: 시동 남은 시간) */
     @SuppressLint("SetTextI18n")
     private fun refreshEngine() {
         if (prefs.mode != Prefs.MODE_SENDER) return
-        val running = prefs.engineRunning()
-        engineRunningBox.visibility = if (running) View.VISIBLE else View.GONE
-        engineIdleBox.visibility = if (running) View.GONE else View.VISIBLE
-        if (running) {
-            engineStateText.text = "시동 · 공조 켜짐"
+        val door = "문 · " + when (prefs.door) {
+            "locked" -> "잠김"; "unlocked" -> "열림"; else -> "상태 모름"
+        } + if (prefs.doorTime > 0) " (${ago(prefs.doorTime)} 기준)" else ""
+        val engine = if (prefs.engineRunning()) {
             if (prefs.engineMinutes > 0) {
                 val left = (prefs.engineStart + prefs.engineMinutes * 60_000L - System.currentTimeMillis()) / 1000
-                engineCountdown.text = "%d:%02d 남음".format(left / 60, left % 60)
-            } else engineCountdown.text = "켜짐 (유지 시간 모름)"
-        } else engineStateText.text = "시동 · 꺼짐"
+                "시동 · 켜짐 · %d:%02d 남음".format(left / 60, left % 60)
+            } else "시동 · 켜짐 (유지 시간 모름)"
+        } else "시동 · 꺼짐"
+        carText.text = "$door\n$engine"
     }
 
     @SuppressLint("SetTextI18n")
@@ -430,16 +376,6 @@ class MainActivity : Activity() {
         val receiver = prefs.mode == Prefs.MODE_RECEIVER
         senderBox.visibility = if (receiver) View.GONE else View.VISIBLE
         receiverBox.visibility = if (receiver) View.VISIBLE else View.GONE
-        // 실행 아이콘은 리모컨에서만 앱 목록에 보이게
-        val state = if (receiver) PackageManager.COMPONENT_ENABLED_STATE_DISABLED else PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-        for (c in listOf("unlock", "lock", "start1", "start2", "start3", "start_max", "stop", "signal")) {
-            try {
-                packageManager.setComponentEnabledSetting(
-                    ComponentName(this, "$packageName.T_$c"), state, PackageManager.DONT_KILL_APP
-                )
-            } catch (_: Exception) {
-            }
-        }
         if (!receiver) StatusWorker.schedule(this)
     }
 
@@ -461,10 +397,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun send(cmd: String) {
+    private fun confirmSend(cmd: String) {
         if (!prefs.isPaired) { toast("먼저 페어링 코드를 설정하세요"); return }
-        SenderService.send(this, cmd, "앱")
-        toast("${Prefs.cmdLabel(cmd)} 보냄")
+        AlertDialog.Builder(this)
+            .setMessage("픽셀1로 '${Prefs.cmdLabel(cmd)}' 명령을 보내요. 실제로 차가 움직여요. 보낼까요?")
+            .setPositiveButton("보내기") { _, _ -> SenderService.send(this, cmd, "테스트") }
+            .setNegativeButton("취소", null).show()
     }
 
     private fun testRun(cmd: String) {

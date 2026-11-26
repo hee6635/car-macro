@@ -3,5 +3,12 @@
     <string name="app_name">차량 매크로</string>
     <string name="a11y_label">차량 매크로 (기아 앱 자동 터치)</string>
     <string name="a11y_desc">원격 명령을 받으면 기아 앱을 열고 설정한 버튼을 대신 눌러 줍니다. 수신기(집에 둔 폰)에서만 켜세요.</string>
-    <string name="widget_label">차 문 열기/잠그기</string>
+    <string name="sc_unlock">차 문 열기</string>
+    <string name="sc_lock">차 문 잠그기</string>
+    <string name="sc_start1">차 시동 · 한파</string>
+    <string name="sc_start2">차 시동 · 난방</string>
+    <string name="sc_start3">차 시동 · 냉방</string>
+    <string name="sc_start_max">차 시동 · 최대 난방</string>
+    <string name="sc_stop">차 시동 끄기</string>
+    <string name="sc_signal">퇴근 신호</string>
 </resources>

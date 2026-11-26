@@ -78,7 +78,6 @@ class StatusWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params)
                 prefs.loginWarned = false
                 Notifier.cancel(ctx, Notifier.ID_WARN_LOGIN)
             }
-            CarWidget.updateAll(ctx, null)
         }
     }
 }

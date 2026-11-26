@@ -78,7 +78,6 @@ class SenderService : Service() {
         val n = Notifier.progress(this, label, text, step)
         if (nid == fgId) fgNote = n
         Notifier.notify(this, nid, n)
-        CarWidget.updateAll(this, "$label · $text")
     }
 
     /** 명령 하나 처리 → 최종 알림 반환 */
@@ -165,7 +164,7 @@ class SenderService : Service() {
         }
         AppLog.i(this, "[리모컨] $title - $msg")
         prefs.lastResult = "$title · $time"
-        CarWidget.updateAll(this, null)
+        prefs.addHistory(source, title, msg)
         return Notifier.build(this, title, "$msg\n($time · $source)")
     }
 

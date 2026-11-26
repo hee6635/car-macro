@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 앱 동작: 갤럭시 루틴 '앱 동작 실행'과 빅스비에서 고를 수 있는 바로가기 -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_unlock"
+        android:shortcutId="unlock"
+        android:shortcutLongLabel="@string/sc_unlock"
+        android:shortcutShortLabel="@string/sc_unlock">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="unlock" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_lock"
+        android:shortcutId="lock"
+        android:shortcutLongLabel="@string/sc_lock"
+        android:shortcutShortLabel="@string/sc_lock">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="lock" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_start1"
+        android:shortcutId="start1"
+        android:shortcutLongLabel="@string/sc_start1"
+        android:shortcutShortLabel="@string/sc_start1">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="start1" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_start2"
+        android:shortcutId="start2"
+        android:shortcutLongLabel="@string/sc_start2"
+        android:shortcutShortLabel="@string/sc_start2">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="start2" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_start3"
+        android:shortcutId="start3"
+        android:shortcutLongLabel="@string/sc_start3"
+        android:shortcutShortLabel="@string/sc_start3">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="start3" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_max"
+        android:shortcutId="start_max"
+        android:shortcutLongLabel="@string/sc_start_max"
+        android:shortcutShortLabel="@string/sc_start_max">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="start_max" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_stop"
+        android:shortcutId="stop"
+        android:shortcutLongLabel="@string/sc_stop"
+        android:shortcutShortLabel="@string/sc_stop">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="stop" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_t_signal"
+        android:shortcutId="signal"
+        android:shortcutLongLabel="@string/sc_signal"
+        android:shortcutShortLabel="@string/sc_signal">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.hee.carmacro.TriggerActivity"
+            android:targetPackage="com.hee.carmacro">
+            <extra
+                android:name="cmd"
+                android:value="signal" />
+        </intent>
+    </shortcut>
+</shortcuts>
