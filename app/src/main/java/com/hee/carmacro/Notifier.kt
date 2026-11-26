@@ -10,21 +10,23 @@ import android.content.Intent
 object Notifier {
     const val CH_SERVICE = "service"
     const val CH_RESULT = "result"
+    const val CH_WARN = "warn"
 
-    const val ID_SENDER_FG = 10
     const val ID_RECEIVER_FG = 20
     const val ID_RESULT = 30
     const val ID_DUMP = 40
+    const val ID_WARN_PIXEL = 50
+    const val ID_WARN_LOGIN = 51
+    const val ID_CMD_BASE = 1000
 
     fun ensureChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CH_SERVICE, "진행 상태", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(
-            NotificationChannel(CH_SERVICE, "진행 상태", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CH_RESULT, "실행 결과", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true) }
         )
         nm.createNotificationChannel(
-            NotificationChannel(CH_RESULT, "실행 결과", NotificationManager.IMPORTANCE_HIGH).apply {
-                enableVibration(true)
-            }
+            NotificationChannel(CH_WARN, "픽셀1 경고", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true) }
         )
     }
 
@@ -44,9 +46,24 @@ object Notifier {
             .build()
     }
 
-    fun result(ctx: Context, title: String, text: String, id: Int = ID_RESULT) {
+    /** 명령 진행 알림: step 1 전송, 2 픽셀1 받음, 3 차 응답 */
+    fun progress(ctx: Context, title: String, text: String, step: Int): Notification {
         ensureChannels(ctx)
-        val n = Notification.Builder(ctx, CH_RESULT)
+        return Notification.Builder(ctx, CH_SERVICE)
+            .setSmallIcon(R.drawable.ic_car)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSubText(listOf("전송", "픽셀1 받음", "차 응답").take(step.coerceIn(1, 3)).joinToString(" → "))
+            .setProgress(3, step, false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openApp(ctx))
+            .build()
+    }
+
+    fun build(ctx: Context, title: String, text: String, channel: String = CH_RESULT): Notification {
+        ensureChannels(ctx)
+        return Notification.Builder(ctx, channel)
             .setSmallIcon(R.drawable.ic_car)
             .setContentTitle(title)
             .setContentText(text)
@@ -54,9 +71,17 @@ object Notifier {
             .setAutoCancel(true)
             .setContentIntent(openApp(ctx))
             .build()
+    }
+
+    fun notify(ctx: Context, id: Int, n: Notification) {
         try {
             ctx.getSystemService(NotificationManager::class.java).notify(id, n)
         } catch (_: SecurityException) {
         }
     }
+
+    fun result(ctx: Context, title: String, text: String, id: Int = ID_RESULT, channel: String = CH_RESULT) =
+        notify(ctx, id, build(ctx, title, text, channel))
+
+    fun cancel(ctx: Context, id: Int) = ctx.getSystemService(NotificationManager::class.java).cancel(id)
 }

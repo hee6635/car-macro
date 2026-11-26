@@ -1,5 +1,6 @@
 package com.hee.carmacro
 
+import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -7,130 +8,178 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.ServiceCompat
-import java.util.concurrent.atomic.AtomicBoolean
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * 리모컨 쪽: 명령을 서명해서 ntfy로 보내고, 수신기(픽셀1)의 ack/result를 기다려
- * 알림으로 보여준다. 위젯 버튼과 앱 버튼 모두 이 서비스를 시작한다.
+ * 리모컨: 명령을 서명해 ntfy로 보내고 픽셀1의 ack/result를 기다린다.
+ * 명령마다 알림 하나가 '전송 → 픽셀1 받음 → 차 응답 → 결과'로 바뀐다.
+ * 여러 명령이 오면 순서대로 처리.
  */
 class SenderService : Service() {
-    private val busy = AtomicBoolean(false)
+    private val queue = LinkedBlockingQueue<Pair<String, String>>()   // (cmd, source)
+    @Volatile private var worker: Thread? = null
     @Volatile private var stream: Ntfy.Stream? = null
+    private var seq = 0
+    @Volatile private var fgId = 0
+    @Volatile private var fgNote: Notification? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val cmd = intent?.getStringExtra(EXTRA_CMD) ?: Prefs.CMD_UNLOCK
+        val cmd = intent?.getStringExtra(EXTRA_CMD) ?: Prefs.CMD_LOCK
+        val source = intent?.getStringExtra(EXTRA_SOURCE) ?: "앱"
         val label = Prefs.cmdLabel(cmd)
-        startFg("$label 전송 중…")
-        if (!busy.compareAndSet(false, true)) {
-            status("이전 명령 처리 중입니다")
-            return START_NOT_STICKY
+        // 같은 명령이 이미 대기 중이면 중복으로 보고 무시
+        val duplicate = queue.any { it.first == cmd }
+        synchronized(this) {
+            val note = fgNote
+            if (worker != null && note != null) startFg(fgId, note)   // 진행 중인 알림 유지
+            else startFg(Notifier.ID_CMD_BASE, Notifier.progress(this, "$label 준비 중", "잠시만요", 1))
+            if (!duplicate) queue.add(cmd to source)
+            if (worker == null) worker = Thread({ loop() }, "sender").apply { start() }
         }
-        Thread({ run(cmd, label) }, "sender").start()
         return START_NOT_STICKY
     }
 
-    private fun startFg(text: String) {
-        val n = Notifier.ongoing(this, "차량 매크로", text)
+    private fun startFg(id: Int, n: Notification) {
+        fgId = id; fgNote = n
         ServiceCompat.startForeground(
-            this, Notifier.ID_SENDER_FG, n,
+            this, id, n,
             if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
         )
     }
 
-    private fun status(text: String) {
-        val prefs = Prefs(this)
-        prefs.senderStatus = text
-        CarWidget.updateAll(this, text)
-        try {
-            getSystemService(android.app.NotificationManager::class.java)
-                .notify(Notifier.ID_SENDER_FG, Notifier.ongoing(this, "차량 매크로", text))
-        } catch (_: SecurityException) {
+    private fun loop() {
+        var lastFinal: Pair<Int, Notification>? = null
+        while (true) {
+            val next = synchronized(this) {
+                queue.poll() ?: run {
+                    worker = null
+                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+                    fgNote = null
+                    null
+                }
+            } ?: break
+            val (cmd, source) = next
+            val nid = Notifier.ID_CMD_BASE + (++seq)
+            val label = Prefs.cmdLabel(cmd)
+            startFg(nid, Notifier.progress(this, "$label 전송 중", source, 1))
+            lastFinal?.let { Notifier.notify(this, it.first, it.second) }
+            lastFinal = nid to send(cmd, label, source, nid)
         }
+        lastFinal?.let { Notifier.notify(this, it.first, it.second) }
+        synchronized(this) { if (worker == null) stopSelf() }
     }
 
-    private fun run(cmd: String, label: String) {
+    private fun stage(nid: Int, label: String, text: String, step: Int) {
+        val n = Notifier.progress(this, label, text, step)
+        if (nid == fgId) fgNote = n
+        Notifier.notify(this, nid, n)
+        CarWidget.updateAll(this, "$label · $text")
+    }
+
+    /** 명령 하나 처리 → 최종 알림 반환 */
+    private fun send(cmd: String, label: String, source: String, nid: Int): Notification {
         val prefs = Prefs(this)
+        if (!prefs.isPaired) return finish(prefs, label, false, "페어링 코드가 없어요. 앱에서 먼저 설정하세요.", source)
+        val id = Protocol.newId()
+        val sentAt = System.currentTimeMillis() / 1000
         try {
-            if (!prefs.isPaired) {
-                finish(false, label, "페어링 코드가 없습니다. 앱에서 먼저 설정하세요.")
-                return
-            }
-            val id = Protocol.newId()
-            val sentAt = System.currentTimeMillis() / 1000
-            status("$label 전송 중…")
-            AppLog.i(this, "[리모컨] $label 전송 id=$id")
+            AppLog.i(this, "[리모컨] $label 전송 ($source) id=$id")
             Ntfy.publish(prefs.server, prefs.topic, Protocol.encode(Msg("cmd", cmd, id), prefs.secret))
-            status("$label 전송됨 · 수신기 응답 대기")
-
-            var resultMsg: Msg? = null
-            var gotAck = false
-            val deadline = System.currentTimeMillis() + WAIT_MS
-            // 타임아웃 감시: 시간이 지나면 스트림을 끊는다
-            val watchdog = Thread {
-                try {
-                    while (System.currentTimeMillis() < deadline && resultMsg == null) Thread.sleep(500)
-                } catch (_: InterruptedException) {
-                }
-                stream?.cancel()
-            }.apply { isDaemon = true; start() }
-
-            while (resultMsg == null && System.currentTimeMillis() < deadline) {
-                try {
-                    Ntfy.subscribe(prefs.server, prefs.topic, (sentAt - 2).toString(),
-                        onOpen = { stream = it }) { _, body ->
-                        val m = Protocol.decode(body, prefs.secret)
-                        if (m != null && m.id == id) {
-                            when (m.type) {
-                                "ack" -> if (!gotAck) {
-                                    gotAck = true
-                                    status("수신기가 받음 · 기아 앱 조작 중…")
-                                }
-                                "result" -> resultMsg = m
-                            }
-                        }
-                        resultMsg == null
-                    }
-                } catch (e: Exception) {
-                    if (resultMsg == null && System.currentTimeMillis() < deadline) Thread.sleep(2000)
-                }
-            }
-            watchdog.interrupt()
-
-            val r = resultMsg
-            when {
-                r != null -> finish(r.ok, label, r.msg)
-                gotAck -> finish(false, label, "수신기가 명령을 받았지만 결과가 오지 않았습니다(시간 초과). 기아 앱을 직접 확인하세요.")
-                else -> finish(false, label, "수신기(픽셀1)가 응답하지 않습니다. 전원/인터넷/수신 서비스를 확인하세요.")
-            }
         } catch (e: Exception) {
-            finish(false, label, "전송 오류: ${e.message}")
+            return finish(prefs, label, false, "전송 실패: ${e.message}. 인터넷 연결을 확인하세요.", source)
+        }
+        stage(nid, "$label 진행 중", "픽셀1 응답 기다리는 중", 1)
+
+        var result: Msg? = null
+        var gotAck = false
+        val start = System.currentTimeMillis()
+        fun deadline() = start + (if (gotAck) WAIT_RESULT_MS else WAIT_ACK_MS)
+        val watchdog = Thread {
+            try {
+                while (result == null && System.currentTimeMillis() < deadline()) Thread.sleep(500)
+            } catch (_: InterruptedException) {
+            }
+            stream?.cancel()
+        }.apply { isDaemon = true; start() }
+
+        while (result == null && System.currentTimeMillis() < deadline()) {
+            try {
+                Ntfy.subscribe(prefs.server, prefs.topic, (sentAt - 2).toString(), onOpen = { stream = it }) { _, body ->
+                    val m = Protocol.decode(body, prefs.secret)
+                    if (m != null && m.id == id) {
+                        if (m.type == "ack" && !gotAck) {
+                            gotAck = true
+                            stage(nid, "$label 진행 중", m.msg.ifEmpty { "픽셀1이 기아 앱 조작 중" }, 2)
+                        } else if (m.type == "result") result = m
+                    }
+                    result == null
+                }
+            } catch (e: Exception) {
+                if (result == null && System.currentTimeMillis() < deadline()) Thread.sleep(2000)
+            }
+        }
+        watchdog.interrupt()
+
+        val r = result
+        return when {
+            r != null -> {
+                val d = r.dataJson()
+                val code = d.optString("code", if (r.ok) Protocol.CODE_OK else Protocol.CODE_FAIL)
+                applyCarState(prefs, cmd, code, d.optString("door"), d.optString("engine"), d.optInt("minutes"))
+                if (code == Protocol.CODE_LOGIN) {
+                    prefs.loginWarned = true
+                    Notifier.result(this, "기아 앱 다시 로그인 필요",
+                        "픽셀1의 기아 앱이 로그아웃됐어요. 픽셀1에서 로그인해 주세요.", Notifier.ID_WARN_LOGIN, Notifier.CH_WARN)
+                }
+                finish(prefs, label, r.ok, r.msg, source, already = code == Protocol.CODE_ALREADY)
+            }
+            gotAck -> finish(prefs, label, false, "픽셀1이 받았지만 결과가 오지 않았어요. 기아 앱을 직접 확인하세요.", source)
+            else -> finish(prefs, label, false, "픽셀1이 응답하지 않아요. 기아 앱으로 직접 해 주세요. (픽셀1 전원/인터넷 확인)", source)
         }
     }
 
-    private fun finish(ok: Boolean, label: String, msg: String) {
-        val title = if (ok) "✅ $label 성공" else "❌ $label 실패"
-        AppLog.i(this, "[리모컨] $title - $msg")
-        Prefs(this).senderStatus = "$title · ${time()}"
-        CarWidget.updateAll(this, "$title · ${time()}")
-        Notifier.result(this, title, msg)
-        busy.set(false)
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+    private fun applyCarState(prefs: Prefs, cmd: String, code: String, door: String, engine: String, minutes: Int) {
+        val now = System.currentTimeMillis()
+        if (door.isNotEmpty()) { prefs.door = door; prefs.doorTime = now }
+        if (engine == "on" && (code == Protocol.CODE_OK || !prefs.engineRunning())) {
+            if (code == Protocol.CODE_OK) {
+                prefs.engineStart = now
+                prefs.engineMinutes = minutes
+            }
+            prefs.engineOn = true
+        } else if (engine == "off") prefs.engineOn = false
+        if (cmd == Prefs.CMD_STOP && code != Protocol.CODE_FAIL) prefs.engineOn = false
     }
 
-    private fun time() = java.text.SimpleDateFormat("HH:mm", java.util.Locale.KOREA).format(java.util.Date())
+    private fun finish(prefs: Prefs, label: String, ok: Boolean, msg: String, source: String, already: Boolean = false): Notification {
+        val time = SimpleDateFormat("HH:mm", Locale.KOREA).format(Date())
+        val title = when {
+            already -> "ℹ️ $label · $msg"
+            ok -> "✅ $label 성공"
+            else -> "❌ $label 실패"
+        }
+        AppLog.i(this, "[리모컨] $title - $msg")
+        prefs.lastResult = "$title · $time"
+        CarWidget.updateAll(this, null)
+        return Notifier.build(this, title, "$msg\n($time · $source)")
+    }
 
     companion object {
         const val EXTRA_CMD = "cmd"
-        private const val WAIT_MS = 150_000L
+        const val EXTRA_SOURCE = "source"
+        private const val WAIT_ACK_MS = 45_000L
+        private const val WAIT_RESULT_MS = 180_000L
 
-        fun intent(ctx: Context, cmd: String) =
-            Intent(ctx, SenderService::class.java).putExtra(EXTRA_CMD, cmd)
+        fun intent(ctx: Context, cmd: String, source: String) =
+            Intent(ctx, SenderService::class.java).putExtra(EXTRA_CMD, cmd).putExtra(EXTRA_SOURCE, source)
 
-        fun send(ctx: Context, cmd: String) {
-            ctx.startForegroundService(intent(ctx, cmd))
+        fun send(ctx: Context, cmd: String, source: String) {
+            ctx.startForegroundService(intent(ctx, cmd, source))
         }
     }
 }

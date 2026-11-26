@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
@@ -41,6 +42,112 @@
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 실행 아이콘: 루틴 '앱 열기' / 빅스비 / 측면 버튼 / 홈 화면에서 사용 -->
+        <activity
+            android:name=".TriggerActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity-alias
+            android:name=".T_unlock"
+            android:exported="true"
+            android:icon="@drawable/ic_t_unlock"
+            android:label="차 문 열기"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="unlock" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_lock"
+            android:exported="true"
+            android:icon="@drawable/ic_t_lock"
+            android:label="차 문 잠금"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="lock" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_start1"
+            android:exported="true"
+            android:icon="@drawable/ic_t_start1"
+            android:label="차 시동 · 한파"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="start1" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_start2"
+            android:exported="true"
+            android:icon="@drawable/ic_t_start2"
+            android:label="차 시동 · 난방"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="start2" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_start3"
+            android:exported="true"
+            android:icon="@drawable/ic_t_start3"
+            android:label="차 시동 · 냉방"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="start3" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_start_max"
+            android:exported="true"
+            android:icon="@drawable/ic_t_max"
+            android:label="차 시동 · 최대 난방"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="start_max" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_stop"
+            android:exported="true"
+            android:icon="@drawable/ic_t_stop"
+            android:label="차 시동 끄기"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="stop" />
+        </activity-alias>
+        <activity-alias
+            android:name=".T_signal"
+            android:exported="true"
+            android:icon="@drawable/ic_t_signal"
+            android:label="퇴근 신호"
+            android:targetActivity=".TriggerActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="cmd" android:value="signal" />
+        </activity-alias>
 
         <!-- 리모컨: 명령 전송 후 결과 대기 -->
         <service

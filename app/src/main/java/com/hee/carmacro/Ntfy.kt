@@ -33,6 +33,20 @@ object Ntfy {
         }
     }
 
+    /** 저장된 메시지를 한 번에 가져오기 (since: "2h", 메시지 id, unix 초) → (ntfy id, 본문) 목록 */
+    @Throws(IOException::class)
+    fun poll(server: String, topic: String, since: String): List<Pair<String, String>> {
+        val req = Request.Builder().url("$server/$topic/json?poll=1&since=$since").build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw IOException("ntfy 조회 실패 HTTP ${resp.code}")
+            return resp.body!!.string().lines().mapNotNull { line ->
+                val j = try { JSONObject(line) } catch (e: Exception) { null }
+                if (j == null || j.optString("event") != "message") null
+                else j.optString("id") to j.optString("message")
+            }
+        }
+    }
+
     class Stream(private val call: okhttp3.Call) {
         fun cancel() = call.cancel()
     }

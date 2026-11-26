@@ -13,35 +13,44 @@ import android.os.Looper
 import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 스크립트 명령 (한 줄에 하나, # 은 주석, 대안 문구는 | 로 구분)
- *   restart                 대상 앱을 강제로 새로 시작 (홈 화면부터)
- *   launch                  대상 앱 실행 (이미 열려 있으면 그 화면으로)
- *   wait <초>               기다리기
- *   click [초] <문구>       문구/설명/리소스ID(id:xxx)가 보이면 누르기 (기본 15초 대기)
- *   clickif [초] <문구>     있으면 누르고 없으면 그냥 넘어가기 (팝업 닫기용, 기본 3초)
- *   waitfor [초] <문구>     문구가 나타날 때까지 기다리기 (없으면 실패)
- *   tap <x> <y>             좌표 터치 (화면 분석 결과의 좌표 참고)
- *   pin <숫자>              숫자 키패드 버튼을 차례로 누르기 (PIN 입력)
- *   failon <문구>           이후 expect 중 이 문구가 보이면 실패 처리
- *   expect [초] <문구>      화면/알림/토스트에 문구가 나오면 성공 (기본 60초)
- *   expectnoti [초] <문구>  알림/토스트에서만 찾기
- *   back / home             뒤로 / 홈
- * expect 없이 끝까지 실행되면 "버튼 누름 완료"로 성공 처리.
+ * 수신기(픽셀1)에서 기아 앱을 대신 조작하는 접근성 서비스.
+ * 기아 앱 화면 구조(2026-11 확인):
+ *   하단 탭 '제어' → 타일 [시동/공조 켜기] [최대 난방 켜기] [문 잠금 해제|잠금] ...
+ *   '시동 / 공조 설정' → 공조 모드, 시동 유지 시간, 희망 온도(+/-), 스위치들, 시트 열선/통풍
+ *   PIN: '간편비밀번호' 숫자 키패드
+ *   결과: 기아 알림 '원격제어 결과 안내 …'
  */
 class MacroAccessibilityService : AccessibilityService() {
 
-    data class Result(val ok: Boolean, val message: String)
+    data class Result(
+        val code: String,
+        val message: String,
+        val door: String = "",
+        val engine: String = "",
+        val minutes: Int = 0,
+    ) {
+        val ok get() = code == Protocol.CODE_OK || code == Protocol.CODE_ALREADY
 
-    private data class Ev(val time: Long, val pkg: String, val text: String)
+        fun dataJson(): String = JSONObject().apply {
+            put("code", code); put("door", door); put("engine", engine); put("minutes", minutes)
+        }.toString()
+    }
+
+    private class Fail(val code: String, msg: String) : Exception(msg)
+
+    private data class Ev(val time: Long, val pkg: String, val type: Int, val text: String)
 
     private val events = ArrayDeque<Ev>()
     private val busy = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
+    private var kiaPkg = ""
+    private var pin = ""
 
     override fun onServiceConnected() {
         instance = this
@@ -75,170 +84,428 @@ class MacroAccessibilityService : AccessibilityService() {
         val text = sb.toString().trim()
         if (text.isEmpty()) return
         synchronized(events) {
-            events.addLast(Ev(System.currentTimeMillis(), e.packageName?.toString() ?: "", text))
-            while (events.size > 60) events.removeFirst()
+            events.addLast(Ev(System.currentTimeMillis(), e.packageName?.toString() ?: "", type, text))
+            while (events.size > 80) events.removeFirst()
         }
     }
 
-    // ───────────────────────── 스크립트 실행 ─────────────────────────
+    // ═════════════════════════ 명령 실행 ═════════════════════════
 
-    private class Fail(msg: String) : Exception(msg)
-
-    /** 백그라운드 스레드에서 호출할 것 (블로킹) */
-    fun runScript(script: String, targetPkg: String): Result {
-        if (!busy.compareAndSet(false, true)) return Result(false, "이미 다른 명령을 실행 중입니다")
-        val started = System.currentTimeMillis()
+    /** 백그라운드 스레드에서 호출 (블로킹). */
+    fun run(cmd: String, prefs: Prefs): Result {
+        if (!busy.compareAndSet(false, true)) return Result(Protocol.CODE_FAIL, "이미 다른 명령을 실행 중이에요")
+        kiaPkg = prefs.targetPackage
+        pin = prefs.pin
         val pm = getSystemService(PowerManager::class.java)
         @Suppress("DEPRECATION")
         val screen = pm.newWakeLock(
-            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-            "carmacro:screen"
+            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "carmacro:screen"
         )
-        screen.acquire(5 * 60_000L)
-        var lastClicked = ""
-        try {
+        screen.acquire(4 * 60_000L)
+        log("━━ ${Prefs.cmdLabel(cmd)} 시작")
+        return try {
+            if (kiaPkg.isEmpty()) throw Fail(Protocol.CODE_FAIL, "기아 앱이 선택되지 않았어요 (픽셀1 설정)")
             wakeAndUnlock()
-            val failWords = mutableListOf<String>()
-            var expectDone = false
-            for ((lineNo, raw) in script.lines().withIndex()) {
-                val line = raw.substringBefore('#').trim()
-                if (line.isEmpty()) continue
-                val op = line.substringBefore(' ').lowercase()
-                val arg = line.substringAfter(' ', "").trim()
-                log("▶ ${lineNo + 1}: $line")
-                when (op) {
-                    "restart" -> launch(targetPkg, fresh = true)
-                    "launch" -> launch(targetPkg, fresh = false)
-                    "wait" -> Thread.sleep(((arg.toDoubleOrNull() ?: 1.0) * 1000).toLong())
-                    "click" -> {
-                        val (t, words) = timeoutAndWords(arg, 15)
-                        val n = waitNode(words, t)
-                            ?: throw Fail("'${words.joinToString("/")}' 버튼을 화면에서 찾지 못했습니다 (줄 ${lineNo + 1})")
-                        lastClicked = describe(n)
-                        click(n)
-                        Thread.sleep(700)
-                    }
-                    "clickif" -> {
-                        val (t, words) = timeoutAndWords(arg, 3)
-                        waitNode(words, t)?.let { click(it); Thread.sleep(700) }
-                    }
-                    "waitfor" -> {
-                        val (t, words) = timeoutAndWords(arg, 15)
-                        waitNode(words, t)
-                            ?: throw Fail("'${words.joinToString("/")}' 화면이 나타나지 않았습니다 (줄 ${lineNo + 1})")
-                    }
-                    "tap" -> {
-                        val p = arg.split(Regex("[ ,]+")).mapNotNull { it.toFloatOrNull() }
-                        if (p.size < 2) throw Fail("tap 좌표 형식 오류 (줄 ${lineNo + 1})")
-                        tap(p[0], p[1]); Thread.sleep(700)
-                    }
-                    "pin" -> {
-                        for (ch in arg.filter { it.isDigit() }) {
-                            val n = waitNode(listOf("=$ch"), 5)
-                                ?: throw Fail("PIN 키패드 숫자 '$ch' 를 찾지 못했습니다")
-                            click(n); Thread.sleep(350)
-                        }
-                    }
-                    "failon" -> failWords += split(arg)
-                    "expect", "expectnoti" -> {
-                        val (t, words) = timeoutAndWords(arg, 60)
-                        val r = expect(words, failWords, t, started, screenToo = op == "expect")
-                        if (r != null) return r
-                        expectDone = true
-                    }
-                    "back" -> { performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(500) }
-                    "home" -> { performGlobalAction(GLOBAL_ACTION_HOME); Thread.sleep(500) }
-                    else -> throw Fail("알 수 없는 명령 '$op' (줄 ${lineNo + 1})")
-                }
+            openControlTab()
+            val r = when (cmd) {
+                Prefs.CMD_UNLOCK -> door(unlock = true)
+                Prefs.CMD_LOCK -> door(unlock = false)
+                Prefs.CMD_START1, Prefs.CMD_START2, Prefs.CMD_START3 ->
+                    startWithPreset(prefs.preset(Prefs.presetOf(cmd)))
+                Prefs.CMD_START_MAX -> startMax()
+                Prefs.CMD_STOP -> stop()
+                Prefs.CMD_CHECK -> Result(Protocol.CODE_OK, "기아 앱 로그인 정상")
+                else -> throw Fail(Protocol.CODE_FAIL, "알 수 없는 명령: $cmd")
             }
-            return if (expectDone) Result(true, "완료")
-            else Result(true, "버튼 누름 완료" + if (lastClicked.isNotEmpty()) " ($lastClicked)" else "")
+            // 마지막으로 화면에 보이는 문/시동 상태를 함께 보고
+            val after = readCarState()
+            prefs.kiaLogin = "ok"
+            r.copy(
+                door = r.door.ifEmpty { after.first },
+                engine = r.engine.ifEmpty { after.second },
+            ).also { log("✔ ${it.code} ${it.message}") }
         } catch (e: Fail) {
+            if (e.code == Protocol.CODE_LOGIN) prefs.kiaLogin = "logout"
             log("✖ ${e.message}")
-            return Result(false, e.message ?: "실패")
+            Result(e.code, e.message ?: "실패")
         } catch (e: Exception) {
             log("✖ 오류: $e")
-            return Result(false, "오류: ${e.message ?: e.javaClass.simpleName}")
+            Result(Protocol.CODE_FAIL, "오류: ${e.message ?: e.javaClass.simpleName}")
         } finally {
+            try {
+                performGlobalAction(GLOBAL_ACTION_HOME)
+            } catch (_: Exception) {
+            }
             if (screen.isHeld) screen.release()
             busy.set(false)
         }
     }
 
-    /** null = 성공 확인 후 계속 진행. Result = 실패(또는 즉시 종료) */
-    private fun expect(
-        ok: List<String>, fail: List<String>, timeoutSec: Int, since: Long, screenToo: Boolean,
-    ): Result? {
-        val end = System.currentTimeMillis() + timeoutSec * 1000L
-        while (System.currentTimeMillis() < end) {
-            val evTexts = synchronized(events) { events.filter { it.time >= since }.map { it.text } }
-            val screenTexts = if (screenToo) allTexts() else emptyList()
-            val all = evTexts + screenTexts
-            all.firstOrNull { t -> fail.any { matches(t, it) } }?.let {
-                log("✖ 실패 문구 감지: $it")
-                return Result(false, "기아 앱: ${it.take(80)}")
-            }
-            all.firstOrNull { t -> ok.any { matches(t, it) } }?.let {
-                log("✔ 성공 문구 감지: $it")
-                return null
-            }
-            Thread.sleep(500)
-        }
-        return Result(false, "${timeoutSec}초 안에 성공 메시지(${ok.joinToString("/")})를 확인하지 못했습니다")
+    // ── 문 ──
+    private fun door(unlock: Boolean): Result {
+        val state = tileState("문")
+            ?: throw Fail(Protocol.CODE_FAIL, "제어 화면에서 '문' 버튼을 찾지 못했어요")
+        val isLocked = state.contains("해제")   // 잠겨 있으면 버튼이 '잠금 해제'
+        if (unlock && !isLocked) return Result(Protocol.CODE_ALREADY, "이미 열려 있어요", door = "unlocked")
+        if (!unlock && isLocked) return Result(Protocol.CODE_ALREADY, "이미 잠겨 있어요", door = "locked")
+        val r = pressAndWait("문") { s -> if (unlock) !s.contains("해제") else s.contains("해제") }
+        return r.copy(door = if (r.code == Protocol.CODE_OK) (if (unlock) "unlocked" else "locked") else "")
     }
 
-    // ───────────────────────── 동작 도우미 ─────────────────────────
+    // ── 시동 ──
+    private fun startWithPreset(p: Preset): Result {
+        if (engineIsOn()) return Result(Protocol.CODE_ALREADY, "이미 시동이 켜져 있어요", engine = "on")
+        var startedInSettings = false
+        if (!p.isEmpty) startedInSettings = applyPreset(p)
+        val r = if (startedInSettings) waitResult(null) { true }
+        else {
+            if (tileState("시동/공조") == null) openControlTab()
+            pressAndWait("시동/공조") { it.contains("끄기") }
+        }
+        return r.copy(engine = if (r.code == Protocol.CODE_OK) "on" else "", minutes = p.minutes)
+    }
+
+    private fun startMax(): Result {
+        if (engineIsOn()) return Result(Protocol.CODE_ALREADY, "이미 시동이 켜져 있어요", engine = "on")
+        val r = pressAndWait("최대 난방") { it.contains("끄기") }
+        return r.copy(engine = if (r.code == Protocol.CODE_OK) "on" else "")
+    }
+
+    private fun stop(): Result {
+        val label = listOf("시동/공조", "최대 난방").firstOrNull { tileState(it)?.contains("끄기") == true }
+            ?: return Result(Protocol.CODE_ALREADY, "이미 시동이 꺼져 있어요", engine = "off")
+        val r = pressAndWait(label) { !it.contains("끄기") }
+        return r.copy(engine = if (r.code == Protocol.CODE_OK) "off" else "")
+    }
+
+    private fun engineIsOn() = listOf("시동/공조", "최대 난방").any { tileState(it)?.contains("끄기") == true }
+
+    private fun readCarState(): Pair<String, String> = try {
+        if (tileState("문") == null) "" to ""
+        else {
+            val d = tileState("문")?.let { if (it.contains("해제")) "locked" else "unlocked" } ?: ""
+            d to (if (engineIsOn()) "on" else "off")
+        }
+    } catch (e: Exception) {
+        "" to ""
+    }
+
+    // ═════════════════════════ 기아 앱 화면 이동 ═════════════════════════
 
     private fun wakeAndUnlock() {
         val km = getSystemService(KeyguardManager::class.java)
         if (!km.isKeyguardLocked) return
-        if (km.isDeviceSecure) {
-            // 보안 잠금(PIN/패턴)은 자동으로 풀 수 없음
-            log("잠금화면에 보안 잠금이 있어 해제할 수 없습니다")
-        }
-        startActivity(
-            Intent(this, WakeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+        startActivity(Intent(this, WakeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val end = System.currentTimeMillis() + 4000
         while (km.isKeyguardLocked && System.currentTimeMillis() < end) Thread.sleep(200)
-        if (km.isKeyguardLocked) throw Fail("수신기 잠금화면을 해제하지 못했습니다. 픽셀1의 화면 잠금을 '없음'으로 설정하세요.")
+        if (km.isKeyguardLocked) throw Fail(
+            Protocol.CODE_FAIL, "픽셀1 잠금화면을 넘기지 못했어요. 화면 잠금을 '없음'으로 설정하세요."
+        )
     }
 
-    private fun launch(pkg: String, fresh: Boolean) {
-        if (pkg.isEmpty()) throw Fail("대상 앱(기아 앱)이 설정되지 않았습니다")
-        val intent = packageManager.getLaunchIntentForPackage(pkg)
-            ?: throw Fail("대상 앱($pkg)을 찾을 수 없습니다")
-        if (fresh) {
-            performGlobalAction(GLOBAL_ACTION_HOME)
-            Thread.sleep(800)
-            try {
-                getSystemService(ActivityManager::class.java).killBackgroundProcesses(pkg)
-            } catch (_: Exception) {
-            }
-            Thread.sleep(500)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-        } else {
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /** 기아 앱을 새로 띄우고 하단 '제어' 탭까지 이동 */
+    private fun openControlTab() {
+        val intent = packageManager.getLaunchIntentForPackage(kiaPkg)
+            ?: throw Fail(Protocol.CODE_FAIL, "기아 앱($kiaPkg)을 찾을 수 없어요")
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        Thread.sleep(600)
+        try {
+            getSystemService(ActivityManager::class.java).killBackgroundProcesses(kiaPkg)
+        } catch (_: Exception) {
         }
+        Thread.sleep(400)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(intent)
-        log("앱 실행: $pkg")
+        log("기아 앱 실행")
+
+        val end = System.currentTimeMillis() + 35_000
+        while (System.currentTimeMillis() < end) {
+            handleInterrupts()
+            if (tileState("시동/공조") != null || tileState("문") != null) return
+            bottomTab("제어")?.let { click(it); Thread.sleep(1200) }
+            Thread.sleep(500)
+        }
+        throw Fail(Protocol.CODE_FAIL, "기아 앱 '제어' 화면을 열지 못했어요")
     }
 
-    private fun split(arg: String) = arg.split('|').map { it.trim() }.filter { it.isNotEmpty() }
-
-    private fun timeoutAndWords(arg: String, def: Int): Pair<Int, List<String>> {
-        val first = arg.substringBefore(' ')
-        val n = first.toIntOrNull()
-        return if (n != null && arg.contains(' ')) n to split(arg.substringAfter(' '))
-        else def to split(arg)
+    /** 화면 아래쪽에 있는 탭 버튼 */
+    private fun bottomTab(label: String): AccessibilityNodeInfo? {
+        val h = resources.displayMetrics.heightPixels
+        val r = Rect()
+        return visibleNodes().filter { exact(it, label) }
+            .map { it.getBoundsInScreen(r); it to r.centerY() }
+            .filter { it.second > h * 0.8 }
+            .maxByOrNull { it.second }?.first
     }
+
+    /** 끼어드는 화면 처리: 로그인 화면이면 중단, PIN 화면이면 입력, 알림 팝업이면 닫기 */
+    private fun handleInterrupts() {
+        val texts = allTexts()
+        val norm = texts.map { norm(it) }
+        val hasLoginButton = visibleNodes().any { exact(it, "로그인") && clickableOf(it) != null }
+        if (hasLoginButton && norm.none { it.contains("간편비밀번호") }) {
+            throw Fail(Protocol.CODE_LOGIN, "기아 앱이 로그아웃됐어요. 픽셀1에서 다시 로그인해 주세요.")
+        }
+        if (norm.any { it.contains("간편비밀번호") }) enterPin()
+        for (w in POPUP_DISMISS) {
+            visibleNodes().firstOrNull { exact(it, w) }?.let {
+                log("팝업 닫기: $w"); click(it); Thread.sleep(600); return
+            }
+        }
+    }
+
+    // ═════════════════════════ 타일 조작 ═════════════════════════
+
+    /** 제어 탭 타일의 상태 문구 (라벨 제외한 나머지). 타일이 없으면 null */
+    private fun tileState(label: String): String? {
+        val n = visibleNodes().firstOrNull { exact(it, label) } ?: return null
+        val tile = clickableOf(n) ?: return null
+        return subtreeTexts(tile).filter { norm(it) != norm(label) }.joinToString(" ")
+    }
+
+    /** 타일 누르기 → (확인 팝업/PIN 처리) → 결과 대기 */
+    private fun pressAndWait(label: String, reached: (String) -> Boolean): Result {
+        val n = visibleNodes().firstOrNull { exact(it, label) }
+            ?: throw Fail(Protocol.CODE_FAIL, "'$label' 버튼을 찾지 못했어요")
+        val since = System.currentTimeMillis()
+        log("누름: $label (${tileState(label)})")
+        click(clickableOf(n) ?: n)
+        return waitResult(label, since, reached)
+    }
+
+    private fun waitResult(label: String?, since: Long = System.currentTimeMillis(), reached: (String) -> Boolean): Result {
+        val end = System.currentTimeMillis() + 90_000
+        var requested = false
+        while (System.currentTimeMillis() < end) {
+            // PIN / 확인 팝업
+            val texts = allTexts()
+            if (texts.any { norm(it).contains("간편비밀번호") }) enterPin()
+            visibleNodes().firstOrNull { exact(it, "확인") && clickableOf(it) != null }?.let {
+                log("확인 누름"); click(clickableOf(it)!!); Thread.sleep(600)
+            }
+            if (texts.any { it.contains("요청했습니다") }) requested = true
+
+            // 기아 결과 알림/토스트
+            val evs = synchronized(events) {
+                events.filter { it.time >= since && (it.pkg == kiaPkg || it.text.contains("원격제어")) }.map { it.text }
+            }
+            val screenResults = texts.filter { t -> t.contains("원격제어") || OK_WORDS.any { t.contains(it) } }
+            for (t in evs + screenResults) {
+                if (t.contains("요청했습니다")) { requested = true; continue }
+                if (FAIL_WORDS.any { t.contains(it) }) return Result(Protocol.CODE_FAIL, "기아: ${t.take(120)}")
+                if (OK_WORDS.any { t.contains(it) }) return Result(Protocol.CODE_OK, "기아: ${t.take(120)}")
+            }
+            // 타일 상태가 바뀌었으면 성공으로 봄
+            if (label != null) {
+                val s = tileState(label)
+                if (s != null && reached(s)) return Result(Protocol.CODE_OK, "기아 앱에 '$label $s' 로 표시됨")
+            }
+            Thread.sleep(700)
+        }
+        return Result(
+            Protocol.CODE_FAIL,
+            if (requested) "기아에 요청은 됐지만 90초 안에 결과가 오지 않았어요. 기아 앱을 확인하세요."
+            else "기아 앱에서 요청이 접수되지 않았어요."
+        )
+    }
+
+    private fun enterPin() {
+        if (pin.length < 4) throw Fail(Protocol.CODE_FAIL, "간편비밀번호를 물어보는데 픽셀1에 PIN이 설정되지 않았어요")
+        log("간편비밀번호 입력")
+        for (ch in pin) {
+            val n = waitNode(6) { visibleNodes().firstOrNull { exact(it, ch.toString()) } }
+                ?: throw Fail(Protocol.CODE_FAIL, "PIN 키패드 숫자를 읽지 못했어요 (화면 분석 필요)")
+            click(clickableOf(n) ?: n)
+            Thread.sleep(300)
+        }
+        val end = System.currentTimeMillis() + 6000
+        while (System.currentTimeMillis() < end) {
+            val t = allTexts()
+            if (t.none { norm(it).contains("간편비밀번호") }) return
+            if (t.any { it.contains("일치하지") || it.contains("잘못") }) {
+                throw Fail(Protocol.CODE_FAIL, "간편비밀번호가 틀렸어요. 픽셀1의 PIN 설정을 확인하세요.")
+            }
+            Thread.sleep(300)
+        }
+    }
+
+    // ═════════════════════════ 시동/공조 설정 ═════════════════════════
+
+    /** 설정 화면에서 프리셋 적용. 설정 화면 안에서 바로 시동을 걸었으면 true */
+    private fun applyPreset(p: Preset): Boolean {
+        val entry = findWithScroll { exact(it, "시동 / 공조 설정") }
+            ?: throw Fail(Protocol.CODE_FAIL, "'시동 / 공조 설정' 메뉴를 찾지 못했어요")
+        click(clickableOf(entry) ?: entry)
+        waitNode(10) { visibleNodes().firstOrNull { exact(it, "희망 온도") } }
+            ?: throw Fail(Protocol.CODE_FAIL, "시동/공조 설정 화면이 열리지 않았어요")
+        log("시동/공조 설정 적용")
+
+        if (p.mode.isNotEmpty()) selectOption("공조 모드", p.mode)
+        if (p.duration.isNotEmpty()) selectOption("시동 유지 시간", p.duration)
+        if (p.temp.isNotEmpty()) setTemp(p.temp)
+        setSwitch("앞유리 성에 제거", p.defrost)
+        setSwitch("사이드 미러 + 뒷유리", p.mirror)
+        setSwitch("핸들", p.wheel)
+        if (p.seat.isNotEmpty()) selectOption("시트 열선 / 통풍", p.seat)
+
+        // 하단 버튼: 저장류면 저장, 시동 버튼이면 바로 시동
+        val h = resources.displayMetrics.heightPixels
+        val r = Rect()
+        val bottom = visibleNodes().filter { n ->
+            n.getBoundsInScreen(r); r.centerY() > h * 0.75 && clickableOf(n) != null &&
+                !n.text.isNullOrBlank()
+        }
+        bottom.firstOrNull { n -> SAVE_WORDS.any { exact(n, it) } }?.let {
+            log("설정 저장: ${it.text}"); click(clickableOf(it)!!); Thread.sleep(1500)
+            backToControl(); return false
+        }
+        bottom.firstOrNull { n -> norm(n.text.toString()).let { it.contains("시동") && (it.contains("켜") || it.contains("걸")) } }?.let {
+            log("설정 화면에서 시동: ${it.text}"); click(clickableOf(it)!!)
+            return true
+        }
+        log("저장 버튼이 없어 뒤로 나감 (자동 저장으로 가정)")
+        backToControl()
+        return false
+    }
+
+    private fun backToControl() {
+        repeat(3) {
+            if (tileState("시동/공조") != null) return
+            performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(900)
+        }
+        if (tileState("시동/공조") == null) openControlTab()
+    }
+
+    private fun tempValue(s: String): Double? {
+        val t = s.trim().replace("℃", "").replace("°C", "").replace("°", "").trim()
+        return when {
+            t.equals("low", true) || t == "LO" -> -1000.0
+            t.equals("high", true) || t == "HI" -> 1000.0
+            else -> t.toDoubleOrNull()
+        }
+    }
+
+    private fun setTemp(target: String) {
+        val goal = tempValue(target) ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 값 '$target' 형식 오류")
+        val row = findWithScroll { exact(it, "희망 온도") } ?: throw Fail(Protocol.CODE_FAIL, "'희망 온도'를 찾지 못했어요")
+        click(clickableOf(row) ?: row)
+        if (waitNode(5) { visibleNodes().firstOrNull { exact(it, "적용") } } == null) {
+            throw Fail(Protocol.CODE_FAIL, "희망 온도 창이 열리지 않았어요")
+        }
+        var last: Double? = null
+        var stuck = 0
+        var tries = 0
+        while (true) {
+            if (++tries > 60) throw Fail(Protocol.CODE_FAIL, "희망 온도를 맞추지 못했어요")
+            val (valueNode, cur) = bigTempValue() ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 값을 읽지 못했어요")
+            if (cur == goal) { log("희망 온도 = $target"); break }
+            val prev = last
+            if (prev != null && cur == prev) {
+                if (++stuck >= 3) throw Fail(Protocol.CODE_FAIL, "희망 온도가 더 바뀌지 않아요 (현재 ${fmtTemp(cur)})")
+            } else stuck = 0
+            // 목표를 지나쳤으면 (0.5도 단위 등) 거기서 멈춤
+            if (prev != null && ((prev < goal && cur > goal) || (prev > goal && cur < goal))) {
+                log("희망 온도 ≈ ${fmtTemp(cur)}"); break
+            }
+            last = cur
+            val (minus, plus) = plusMinusButtons(valueNode)
+            val btn = (if (cur < goal) plus else minus)
+                ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 +/- 버튼을 찾지 못했어요")
+            click(btn)
+            Thread.sleep(250)
+        }
+        visibleNodes().firstOrNull { exact(it, "적용") }?.let { click(clickableOf(it) ?: it); Thread.sleep(800) }
+    }
+
+    private fun fmtTemp(v: Double) = when (v) { -1000.0 -> "Low"; 1000.0 -> "High"; else -> v.toString() }
+
+    /** 팝업 가운데 큰 온도 표시 (같은 문구가 여러 개면 글자 영역이 가장 큰 것) */
+    private fun bigTempValue(): Pair<AccessibilityNodeInfo, Double>? {
+        val r = Rect()
+        return visibleNodes().mapNotNull { n ->
+            val t = n.text?.toString() ?: return@mapNotNull null
+            val v = tempValue(t) ?: return@mapNotNull null
+            n.getBoundsInScreen(r)
+            Triple(n, v, r.height())
+        }.maxByOrNull { it.third }?.let { it.first to it.second }
+    }
+
+    /** 값 표시와 같은 줄에 있는 왼쪽(-)/오른쪽(+) 버튼 */
+    private fun plusMinusButtons(value: AccessibilityNodeInfo): Pair<AccessibilityNodeInfo?, AccessibilityNodeInfo?> {
+        val vr = Rect().also { value.getBoundsInScreen(it) }
+        val r = Rect()
+        val same = visibleNodes().mapNotNull { clickableOf(it) }.distinct().filter { c ->
+            c.getBoundsInScreen(r)
+            kotlin.math.abs(r.centerY() - vr.centerY()) < vr.height() && !r.contains(vr.centerX(), vr.centerY())
+        }
+        val byDesc = { words: List<String> ->
+            same.firstOrNull { c -> val d = (c.contentDescription ?: c.text ?: "").toString(); words.any { d.contains(it) } }
+        }
+        val minus = byDesc(listOf("감소", "내리", "낮추", "-", "−", "minus")) ?: same.filter { c ->
+            c.getBoundsInScreen(r); r.centerX() < vr.left
+        }.maxByOrNull { c -> c.getBoundsInScreen(r); r.centerX() }
+        val plus = byDesc(listOf("증가", "올리", "높이", "+", "plus")) ?: same.filter { c ->
+            c.getBoundsInScreen(r); r.centerX() > vr.right
+        }.minByOrNull { c -> c.getBoundsInScreen(r); r.centerX() }
+        return minus to plus
+    }
+
+    /** 라벨과 같은 줄의 스위치를 원하는 상태로 (want: 1 켬, 0 끔, -1 그대로) */
+    private fun setSwitch(label: String, want: Int) {
+        if (want < 0) return
+        val row = findWithScroll { exact(it, label) } ?: throw Fail(Protocol.CODE_FAIL, "'$label' 항목을 찾지 못했어요")
+        val sw = switchFor(row) ?: throw Fail(Protocol.CODE_FAIL, "'$label' 스위치를 찾지 못했어요")
+        val on = want == 1
+        if (sw.isChecked == on) return
+        click(clickableOf(sw) ?: sw)
+        Thread.sleep(500)
+        val again = switchFor(visibleNodes().firstOrNull { exact(it, label) } ?: row)
+        log("$label → ${if (again?.isChecked == on) (if (on) "켬" else "끔") else "확인 불가"}")
+    }
+
+    private fun switchFor(label: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        clickableOf(label)?.let { if (it.isCheckable) return it }
+        val lr = Rect().also { label.getBoundsInScreen(it) }
+        val r = Rect()
+        val tol = (40 * resources.displayMetrics.density).toInt()
+        return visibleNodes().filter { it.isCheckable }.filter { n ->
+            n.getBoundsInScreen(r); kotlin.math.abs(r.centerY() - lr.centerY()) < tol
+        }.minByOrNull { n -> n.getBoundsInScreen(r); kotlin.math.abs(r.centerY() - lr.centerY()) }
+    }
+
+    /** 하위 화면에서 문구 고르기 (예: 시동 유지 시간 → "10분") */
+    private fun selectOption(rowLabel: String, option: String) {
+        val row = findWithScroll { exact(it, rowLabel) } ?: throw Fail(Protocol.CODE_FAIL, "'$rowLabel' 항목을 찾지 못했어요")
+        click(clickableOf(row) ?: row)
+        Thread.sleep(1000)
+        val opt = waitNode(6) {
+            visibleNodes().firstOrNull { exact(it, option) && !exact(it, rowLabel) }
+        } ?: run {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            throw Fail(Protocol.CODE_FAIL, "'$rowLabel'에서 '$option' 선택지를 찾지 못했어요 (프리셋 문구 확인)")
+        }
+        click(clickableOf(opt) ?: opt)
+        Thread.sleep(700)
+        visibleNodes().firstOrNull { n -> listOf("적용", "확인", "완료", "저장").any { exact(n, it) } }
+            ?.let { click(clickableOf(it) ?: it); Thread.sleep(700) }
+        if (visibleNodes().none { exact(it, "희망 온도") }) {
+            performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(800)
+        }
+        log("$rowLabel → $option")
+    }
+
+    // ═════════════════════════ 접근성 도우미 ═════════════════════════
 
     private fun norm(s: String) = s.replace(Regex("\\s+"), "").lowercase()
 
-    /** "=x" 는 완전 일치, 그 외는 공백 무시 포함 검사 */
-    private fun matches(text: String, word: String): Boolean =
-        if (word.startsWith("=")) norm(text) == norm(word.substring(1))
-        else norm(text).contains(norm(word))
+    private fun nodeText(n: AccessibilityNodeInfo) = (n.text ?: n.contentDescription)?.toString()
+
+    private fun exact(n: AccessibilityNodeInfo, label: String): Boolean {
+        val t = n.text?.toString()
+        val d = n.contentDescription?.toString()
+        val l = norm(label)
+        return (t != null && norm(t) == l) || (d != null && norm(d) == l)
+    }
 
     private fun roots(): List<AccessibilityNodeInfo> {
         val list = mutableListOf<AccessibilityNodeInfo>()
@@ -262,51 +529,49 @@ class MacroAccessibilityService : AccessibilityService() {
         return out
     }
 
-    private fun allTexts(): List<String> = allNodes().mapNotNull { n ->
-        listOfNotNull(n.text?.toString(), n.contentDescription?.toString())
-            .joinToString(" ").trim().ifEmpty { null }
+    private fun visibleNodes() = allNodes().filter { it.isVisibleToUser }
+
+    private fun allTexts(): List<String> = visibleNodes().mapNotNull { nodeText(it)?.trim()?.ifEmpty { null } }
+
+    private fun subtreeTexts(n: AccessibilityNodeInfo): List<String> {
+        val out = mutableListOf<AccessibilityNodeInfo>()
+        walk(n, out)
+        return out.mapNotNull { nodeText(it)?.trim()?.ifEmpty { null } }
     }
 
-    private fun nodeMatches(n: AccessibilityNodeInfo, word: String): Boolean {
-        if (word.startsWith("id:")) {
-            val id = n.viewIdResourceName ?: return false
-            return id == word.substring(3) || id.endsWith("/" + word.substring(3))
+    private fun clickableOf(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var c: AccessibilityNodeInfo? = n
+        while (c != null && !c.isClickable) c = c.parent
+        return c
+    }
+
+    private fun <T> waitNode(timeoutSec: Int, find: () -> T?): T? {
+        val end = System.currentTimeMillis() + timeoutSec * 1000L
+        while (true) {
+            find()?.let { return it }
+            if (System.currentTimeMillis() >= end) return null
+            Thread.sleep(300)
         }
-        val t = n.text?.toString()
-        val d = n.contentDescription?.toString()
-        return (t != null && matches(t, word)) || (d != null && matches(d, word))
     }
 
-    private fun findNode(words: List<String>): AccessibilityNodeInfo? {
-        val nodes = allNodes().filter { it.isVisibleToUser }
-        // 완전 일치 우선, 그 다음 부분 일치
-        for (w in words) {
-            if (!w.startsWith("=") && !w.startsWith("id:")) {
-                nodes.firstOrNull { nodeMatches(it, "=$w") }?.let { return it }
+    /** 화면에 없으면 스크롤하면서 찾기 */
+    private fun findWithScroll(pred: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        visibleNodes().firstOrNull(pred)?.let { return it }
+        val r = Rect()
+        val scroller = allNodes().filter { it.isScrollable }
+            .maxByOrNull { it.getBoundsInScreen(r); r.width() * r.height() } ?: return null
+        for (action in listOf(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
+            repeat(6) {
+                if (!scroller.performAction(action)) return@repeat
+                Thread.sleep(500)
+                visibleNodes().firstOrNull(pred)?.let { return it }
             }
         }
-        for (w in words) nodes.firstOrNull { nodeMatches(it, w) }?.let { return it }
         return null
     }
 
-    private fun waitNode(words: List<String>, timeoutSec: Int): AccessibilityNodeInfo? {
-        val end = System.currentTimeMillis() + timeoutSec * 1000L
-        while (true) {
-            findNode(words)?.let { return it }
-            if (System.currentTimeMillis() >= end) return null
-            Thread.sleep(400)
-        }
-    }
-
-    private fun describe(n: AccessibilityNodeInfo) =
-        (n.text ?: n.contentDescription ?: n.viewIdResourceName ?: "").toString()
-
     private fun click(n: AccessibilityNodeInfo) {
-        var c: AccessibilityNodeInfo? = n
-        while (c != null && !c.isClickable) c = c.parent
-        log("누름: ${describe(n)}")
-        if (c != null && c.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
-        // 클릭 가능한 노드가 없으면 좌표로 직접 터치
+        if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
         val r = Rect().also { n.getBoundsInScreen(it) }
         tap(r.exactCenterX(), r.exactCenterY())
     }
@@ -325,31 +590,26 @@ class MacroAccessibilityService : AccessibilityService() {
             if (!sent) latch.countDown()
         }
         latch.await(3, TimeUnit.SECONDS)
-        log("터치: (${x.toInt()}, ${y.toInt()})")
     }
 
-    private fun log(s: String) = AppLog.i(this, "[매크로] $s")
+    private fun log(s: String) = AppLog.i(this, "[기아] $s")
 
-    // ───────────────────────── 화면 분석 ─────────────────────────
+    // ═════════════════════════ 화면 분석 ═════════════════════════
 
-    /** 현재 화면의 모든 텍스트/버튼과 최근 알림·토스트를 문자열로 정리 */
     fun dumpScreen(): String {
         val sb = StringBuilder()
-        val pkg = rootInActiveWindow?.packageName ?: "?"
-        sb.append("앱 패키지: $pkg\n")
-        sb.append("── 화면 요소 (★=누를 수 있음, [x,y]=중심 좌표) ──\n")
+        sb.append("앱 패키지: ${rootInActiveWindow?.packageName ?: "?"}\n")
+        sb.append("── 화면 요소 (★=누를 수 있음, ☑/☐=스위치, [x,y]=중심 좌표) ──\n")
         val r = Rect()
         for (n in allNodes()) {
             if (!n.isVisibleToUser) continue
             val t = n.text?.toString()?.trim().orEmpty()
             val d = n.contentDescription?.toString()?.trim().orEmpty()
             val id = n.viewIdResourceName?.substringAfter(":id/").orEmpty()
-            if (t.isEmpty() && d.isEmpty() && id.isEmpty()) continue
+            if (t.isEmpty() && d.isEmpty() && id.isEmpty() && !n.isCheckable) continue
             n.getBoundsInScreen(r)
-            var clickable = n.isClickable
-            var p = n.parent
-            while (!clickable && p != null) { clickable = p.isClickable; p = p.parent }
-            sb.append(if (clickable) "★ " else "  ")
+            sb.append(if (clickableOf(n) != null) "★ " else "  ")
+            if (n.isCheckable) sb.append(if (n.isChecked) "☑ " else "☐ ")
             if (t.isNotEmpty()) sb.append("\"$t\" ")
             if (d.isNotEmpty() && d != t) sb.append("(설명: $d) ")
             if (id.isNotEmpty()) sb.append("id:$id ")
@@ -358,7 +618,7 @@ class MacroAccessibilityService : AccessibilityService() {
         sb.append("── 최근 알림/토스트/창 제목 ──\n")
         synchronized(events) {
             events.toList().takeLast(25).forEach { e ->
-                sb.append("${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date(e.time))} ${e.pkg}: ${e.text}\n")
+                sb.append("${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.KOREA).format(java.util.Date(e.time))} ${e.pkg}: ${e.text}\n")
             }
         }
         return sb.toString()
@@ -366,5 +626,11 @@ class MacroAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile var instance: MacroAccessibilityService? = null
+
+        /** 앱 시작 시 뜨는 공지/광고 팝업 닫기 문구 ('닫기'는 창문 닫기 버튼과 겹쳐서 쓰지 않음) */
+        private val POPUP_DISMISS = listOf("오늘 하루 보지 않기", "다시 보지 않기", "다음에 하기", "나중에", "오늘 그만 보기")
+        private val SAVE_WORDS = listOf("저장", "적용", "확인", "완료", "설정 완료")
+        private val OK_WORDS = listOf("열렸습니다", "잠겼습니다", "켜졌습니다", "꺼졌습니다", "걸렸습니다", "시작되었습니다", "완료되었습니다", "성공")
+        private val FAIL_WORDS = listOf("실패", "할 수 없", "없습니다", "오류", "불가", "다시 시도", "확인해 주세요", "응답이 없")
     }
 }
