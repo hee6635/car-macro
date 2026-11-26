@@ -145,8 +145,13 @@ class ReceiverService : Service() {
                 val prefs = Prefs(this)
                 val svc = MacroAccessibilityService.instance
                 setConn("${Prefs.cmdLabel(cmd)} 실행 중…")
-                val r = svc?.run(cmd, prefs)
-                    ?: MacroAccessibilityService.Result(Protocol.CODE_FAIL, "접근성 권한이 꺼져 있어요")
+                val ps = if (id != null) ProgressSender(prefs, cmd, id) else null
+                val r = try {
+                    svc?.run(cmd, prefs) { ps?.update(it) }
+                        ?: MacroAccessibilityService.Result(Protocol.CODE_FAIL, "접근성 권한이 꺼져 있어요")
+                } finally {
+                    ps?.finish()   // 남은 진행 신호를 다 보낸 뒤에 결과를 보냄 (순서 보장)
+                }
                 if (r.door.isNotEmpty()) { prefs.door = r.door; prefs.doorTime = System.currentTimeMillis() }
                 if (id != null) reply(prefs, Msg("result", cmd, id, r.ok, r.message, r.dataJson()))
                 val title = when (r.code) {
@@ -166,6 +171,30 @@ class ReceiverService : Service() {
                 setConn("대기 중 · 연결됨")
             }
         }
+    }
+
+    /** 진행 상황을 최대 0.5초에 한 번, 가장 최근 것만 보냄 (중계 서버 사용량 절약) */
+    private inner class ProgressSender(val prefs: Prefs, val cmd: String, val id: String) {
+        @Volatile private var latest: String? = null
+        @Volatile private var done = false
+        private var sent: String? = null
+        private val t = Thread({
+            while (true) {
+                val l = latest
+                if (l != null && l != sent) {
+                    try {
+                        Ntfy.publish(prefs.server, prefs.topic, Protocol.encode(Msg("progress", cmd, id, msg = l), prefs.secret))
+                    } catch (_: Exception) {
+                    }
+                    sent = l
+                }
+                if (done && latest == sent) break
+                try { Thread.sleep(500) } catch (_: InterruptedException) { break }
+            }
+        }, "progress").apply { isDaemon = true; start() }
+
+        fun update(s: String) { latest = s }
+        fun finish() { done = true; t.join(4000) }
     }
 
     private fun reply(prefs: Prefs, m: Msg) {

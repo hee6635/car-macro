@@ -92,7 +92,11 @@ class MacroAccessibilityService : AccessibilityService() {
     // ═════════════════════════ 명령 실행 ═════════════════════════
 
     /** 백그라운드 스레드에서 호출 (블로킹). */
-    fun run(cmd: String, prefs: Prefs): Result {
+    /** 진행 상황 알림 (리모컨에 실시간으로 보냄). PIN 숫자는 절대 넣지 않음 */
+    @Volatile private var progress: (String) -> Unit = {}
+
+    fun run(cmd: String, prefs: Prefs, onProgress: (String) -> Unit = {}): Result {
+        progress = onProgress
         if (!busy.compareAndSet(false, true)) return Result(Protocol.CODE_FAIL, "이미 다른 명령을 실행 중이에요")
         kiaPkg = prefs.targetPackage
         pin = prefs.pin
@@ -105,6 +109,7 @@ class MacroAccessibilityService : AccessibilityService() {
         log("━━ ${Prefs.cmdLabel(cmd)} 시작")
         return try {
             if (kiaPkg.isEmpty()) throw Fail(Protocol.CODE_FAIL, "기아 앱이 선택되지 않았어요 (픽셀1 설정)")
+            progress("화면 켜는 중")
             wakeAndUnlock()
             openControlTab()
             val r = when (cmd) {
@@ -219,6 +224,7 @@ class MacroAccessibilityService : AccessibilityService() {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(intent)
         log("기아 앱 실행")
+        progress("기아 앱 여는 중")
 
         val end = System.currentTimeMillis() + 35_000
         var lastTabClick = 0L
@@ -226,6 +232,7 @@ class MacroAccessibilityService : AccessibilityService() {
             handleInterrupts()
             if (tileState("시동/공조") != null || tileState("문") != null) {
                 // 기아 앱은 제어 탭에 들어오면 스스로 새로고침하며 화면을 밀었다 올림 → 멈출 때까지 대기
+                progress("제어 화면 도착")
                 waitSettled()
                 return
             }
@@ -333,7 +340,9 @@ class MacroAccessibilityService : AccessibilityService() {
         val n = visibleNodes().firstOrNull { exact(it, label) }
             ?: throw Fail(Protocol.CODE_FAIL, "'$label' 버튼을 찾지 못했어요")
         val since = System.currentTimeMillis()
-        log("누름: $label (${tileState(label)})")
+        val st = tileState(label).orEmpty()
+        log("누름: $label ($st)")
+        progress("'$label $st' 누름")
         click(clickableOf(n) ?: n)
         return waitResult(label, okText, since, reached)
     }
@@ -341,7 +350,10 @@ class MacroAccessibilityService : AccessibilityService() {
     private fun waitResult(label: String?, okText: String, since: Long = System.currentTimeMillis(), reached: (String) -> Boolean): Result {
         val end = System.currentTimeMillis() + 90_000
         var requested = false
+        var reported = false
+        progress("차 응답 기다리는 중")
         while (System.currentTimeMillis() < end) {
+            if (requested && !reported) { reported = true; progress("차 응답 기다리는 중 (기아: 차량 제어를 요청했습니다)") }
             // PIN / 확인 팝업
             val texts = allTexts()
             if (texts.any { norm(it).contains("간편비밀번호") }) enterPin()
@@ -377,11 +389,14 @@ class MacroAccessibilityService : AccessibilityService() {
     private fun enterPin() {
         if (pin.length < 4) throw Fail(Protocol.CODE_FAIL, "간편비밀번호를 물어보는데 픽셀1에 PIN이 설정되지 않았어요")
         log("간편비밀번호 입력")
-        for (ch in pin) {
+        progress("간편비밀번호 입력 중 " + "○".repeat(pin.length))
+        for ((i, ch) in pin.withIndex()) {
             val n = waitNode(6) { visibleNodes().firstOrNull { exact(it, ch.toString()) } }
                 ?: throw Fail(Protocol.CODE_FAIL, "PIN 키패드 숫자를 읽지 못했어요 (화면 분석 필요)")
             click(clickableOf(n) ?: n)
-            Thread.sleep(300)
+            // 몇 자리째인지만 알림 (숫자는 보내지 않음)
+            progress("간편비밀번호 입력 중 " + "●".repeat(i + 1) + "○".repeat(pin.length - i - 1))
+            Thread.sleep(500)
         }
         val end = System.currentTimeMillis() + 6000
         while (System.currentTimeMillis() < end) {
@@ -404,6 +419,7 @@ class MacroAccessibilityService : AccessibilityService() {
         waitNode(10) { visibleNodes().firstOrNull { exact(it, "희망 온도") } }
             ?: throw Fail(Protocol.CODE_FAIL, "시동/공조 설정 화면이 열리지 않았어요")
         log("시동/공조 설정 적용")
+        progress("공조 설정 여는 중")
 
         if (p.mode.isNotEmpty()) selectOption("공조 모드", p.mode)
         if (p.duration.isNotEmpty()) selectOption("시동 유지 시간", p.duration)
@@ -503,9 +519,16 @@ class MacroAccessibilityService : AccessibilityService() {
         var last: Double? = null
         var stuck = 0
         var tries = 0
+        val seen = mutableListOf<String>()
+        fun show(v: Double, done: Boolean = false) {
+            val f = fmtTemp(v)
+            if (seen.lastOrNull() != f) seen += f
+            progress("희망 온도 맞추는 중 " + seen.takeLast(6).joinToString(" → ") + if (done) " ✓" else "")
+        }
         while (true) {
             if (++tries > 60) throw Fail(Protocol.CODE_FAIL, "희망 온도를 맞추지 못했어요")
             val (valueNode, cur) = bigTempValue() ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 값을 읽지 못했어요")
+            show(cur, done = cur == goal)
             if (cur == goal) { log("희망 온도 = $target"); break }
             val prev = last
             if (prev != null && cur == prev) {
@@ -513,7 +536,7 @@ class MacroAccessibilityService : AccessibilityService() {
             } else stuck = 0
             // 목표를 지나쳤으면 (0.5도 단위 등) 거기서 멈춤
             if (prev != null && ((prev < goal && cur > goal) || (prev > goal && cur < goal))) {
-                log("희망 온도 ≈ ${fmtTemp(cur)}"); break
+                show(cur, done = true); log("희망 온도 ≈ ${fmtTemp(cur)}"); break
             }
             last = cur
             val (minus, plus) = plusMinusButtons(valueNode)
@@ -525,7 +548,12 @@ class MacroAccessibilityService : AccessibilityService() {
         visibleNodes().firstOrNull { exact(it, "적용") }?.let { click(clickableOf(it) ?: it); Thread.sleep(800) }
     }
 
-    private fun fmtTemp(v: Double) = when (v) { -1000.0 -> "Low"; 1000.0 -> "High"; else -> v.toString() }
+    private fun fmtTemp(v: Double) = when {
+        v == -1000.0 -> "Low"
+        v == 1000.0 -> "High"
+        v % 1.0 == 0.0 -> v.toInt().toString()
+        else -> v.toString()
+    }
 
     /** 팝업 가운데 큰 온도 표시 (같은 문구가 여러 개면 글자 영역이 가장 큰 것) */
     private fun bigTempValue(): Pair<AccessibilityNodeInfo, Double>? {
@@ -569,6 +597,7 @@ class MacroAccessibilityService : AccessibilityService() {
         Thread.sleep(500)
         val again = switchFor(visibleNodes().firstOrNull { exact(it, label) } ?: row)
         log("$label → ${if (again?.isChecked == on) (if (on) "켬" else "끔") else "확인 불가"}")
+        progress("$label ${if (on) "켬" else "끔"}")
     }
 
     private fun switchFor(label: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -600,6 +629,7 @@ class MacroAccessibilityService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(800)
         }
         log("$rowLabel → $option")
+        progress("$rowLabel → $option")
     }
 
     // ═════════════════════════ 접근성 도우미 ═════════════════════════

@@ -92,7 +92,8 @@ class SenderService : Service() {
         } catch (e: Exception) {
             return finish(prefs, label, false, "전송 실패: ${e.message}. 인터넷 연결을 확인하세요.", source)
         }
-        stage(nid, "$label 진행 중", "픽셀1 응답 기다리는 중", 1)
+        stage(nid, "$label 진행 중", "전송됨 · 픽셀1 응답 기다리는 중", 1)
+        prefs.liveProgress = "$label\n전송됨 · 픽셀1 응답 기다리는 중"
 
         var result: Msg? = null
         var gotAck = false
@@ -113,7 +114,13 @@ class SenderService : Service() {
                     if (m != null && m.id == id) {
                         if (m.type == "ack" && !gotAck) {
                             gotAck = true
-                            stage(nid, "$label 진행 중", m.msg.ifEmpty { "픽셀1이 기아 앱 조작 중" }, 2)
+                            val t = m.msg.ifEmpty { "픽셀1이 받음" }
+                            stage(nid, "$label 진행 중", t, 2)
+                            prefs.liveProgress = "$label\n$t"
+                        } else if (m.type == "progress") {
+                            gotAck = true
+                            stage(nid, "$label 진행 중", m.msg, 2)
+                            prefs.liveProgress = "$label\n${m.msg}"
                         } else if (m.type == "result") result = m
                     }
                     result == null
@@ -168,6 +175,7 @@ class SenderService : Service() {
         }
         AppLog.i(this, "[리모컨] $title - $msg")
         prefs.lastResult = "$title · $time"
+        prefs.liveProgress = ""
         prefs.addHistory(source, title, msg)
         return Notifier.build(this, title, "$msg\n($time · $source)")
     }

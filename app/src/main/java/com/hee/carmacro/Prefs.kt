@@ -195,6 +195,12 @@ class Prefs(context: Context) {
         put("history", org.json.JSONArray(list.take(20)).toString())
     }
 
+    /** 리모컨: 지금 진행 중인 명령 ("명령\n단계"), 없으면 빈 문자열 */
+    var liveProgress: String
+        get() = s("live_progress")
+        set(v) { put("live_progress", v); putL("live_progress_time", System.currentTimeMillis()) }
+    val liveProgressTime: Long get() = l("live_progress_time")
+
     var lastResult: String
         get() = s("last_result", "아직 실행한 명령이 없어요")
         set(v) = put("last_result", v)

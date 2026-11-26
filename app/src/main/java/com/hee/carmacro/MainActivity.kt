@@ -300,6 +300,14 @@ class MainActivity : Activity() {
             if (!d.optBoolean("a11y", true)) pc.addView(text("⚠️ 픽셀1 접근성 권한이 꺼져 있어요", 13f, Ui.WARN))
         }
 
+        // 진행 중인 명령 (픽셀1이 보내는 단계를 실시간으로)
+        val lp = prefs.liveProgress
+        if (lp.isNotEmpty() && System.currentTimeMillis() - prefs.liveProgressTime < 4 * 60_000L) {
+            val pcard = b.card(Ui.GREEN_BG, Ui.GREEN_D)
+            pcard.addView(text("진행 중 · " + lp.substringBefore('\n'), 13f, Ui.GREEN, bold = true))
+            pcard.addView(text(lp.substringAfter('\n', ""), 17f, Ui.TEXT, bold = true))
+        }
+
         // 차 상태
         val cr = row()
         val door = col(8).apply { background = bg(Ui.CARD, 18, Ui.BORDER); setPadding(dp(16), dp(14), dp(16), dp(14)) }
