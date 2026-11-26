@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">차량 매크로</string>
+    <string name="a11y_label">차량 매크로 (기아 앱 자동 터치)</string>
+    <string name="a11y_desc">원격 명령을 받으면 기아 앱을 열고 설정한 버튼을 대신 눌러 줍니다. 수신기(집에 둔 폰)에서만 켜세요.</string>
+    <string name="widget_label">차 문 열기/잠그기</string>
+</resources>
