@@ -78,9 +78,25 @@ class Ui(private val a: Activity) {
             val f = FrameLayout(a).apply { setPadding(dp(16), dp(8), dp(16), dp(16)); addView(bottom) }
             outer.addView(f)
         }
+        // 안드로이드 15부터 화면이 상태 표시줄/내비게이션 바 밑까지 깔리므로 그만큼 여백
+        outer.setOnApplyWindowInsetsListener { v, insets ->
+            val (top, bottomInset) = barInsets(insets)
+            v.setPadding(0, top, 0, bottomInset)
+            insets
+        }
         a.setContentView(outer)
+        outer.requestApplyInsets()
         return body
     }
+
+    @Suppress("DEPRECATION")
+    private fun barInsets(insets: android.view.WindowInsets): Pair<Int, Int> =
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.ime())
+            bars.top to bars.bottom
+        } else {
+            insets.systemWindowInsetTop to insets.systemWindowInsetBottom
+        }
 
     fun text(s: String, size: Float = 15f, color: Int = TEXT, bold: Boolean = false, mono: Boolean = false) =
         TextView(a).apply {

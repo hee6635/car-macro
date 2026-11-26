@@ -453,7 +453,7 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             }),
             Check("배터리 최적화 제외", "꺼지지 않고 계속 기다리게", batt, false, "열기", { requestBatteryExemption() }),
-            Check("연결 테스트", "기아 앱 '제어' 화면까지 열어 보기 (차는 안 움직임)", prefs.kiaLogin == "ok", false, "실행", {
+            Check("연결 테스트", "기아 앱 제어 화면 열어 보기 · 차 안 움직임", prefs.kiaLogin == "ok", false, "실행", {
                 if (!a11y || pkg.isEmpty()) toast("기아 앱 선택과 접근성을 먼저 해 주세요")
                 else { ReceiverService.runLocal(this, Prefs.CMD_CHECK); toast("기아 앱을 열어 확인해요") }
             }),
