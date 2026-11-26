@@ -144,7 +144,7 @@ class MacroAccessibilityService : AccessibilityService() {
 
     // ── 문 ──
     private fun door(unlock: Boolean): Result {
-        val state = tileState("문")
+        val state = ensureTile("문")
             ?: throw Fail(Protocol.CODE_FAIL, "제어 화면에서 '문' 버튼을 찾지 못했어요")
         val isLocked = state.contains("해제")   // 잠겨 있으면 버튼이 '잠금 해제'
         if (unlock && !isLocked) return Result(Protocol.CODE_ALREADY, "이미 열려 있어요", door = "unlocked")
@@ -160,7 +160,7 @@ class MacroAccessibilityService : AccessibilityService() {
         if (!p.isEmpty) startedInSettings = applyPreset(p)
         val r = if (startedInSettings) waitResult(null) { true }
         else {
-            if (tileState("시동/공조") == null) openControlTab()
+            if (ensureTile("시동/공조", 6) == null) openControlTab()
             pressAndWait("시동/공조") { it.contains("끄기") }
         }
         return r.copy(engine = if (r.code == Protocol.CODE_OK) "on" else "", minutes = p.minutes)
@@ -173,18 +173,19 @@ class MacroAccessibilityService : AccessibilityService() {
     }
 
     private fun stop(): Result {
-        val label = listOf("시동/공조", "최대 난방").firstOrNull { tileState(it)?.contains("끄기") == true }
+        val label = listOf("시동/공조", "최대 난방").firstOrNull { ensureTile(it, 6)?.contains("끄기") == true }
             ?: return Result(Protocol.CODE_ALREADY, "이미 시동이 꺼져 있어요", engine = "off")
         val r = pressAndWait(label) { !it.contains("끄기") }
         return r.copy(engine = if (r.code == Protocol.CODE_OK) "off" else "")
     }
 
-    private fun engineIsOn() = listOf("시동/공조", "최대 난방").any { tileState(it)?.contains("끄기") == true }
+    private fun engineIsOn() = listOf("시동/공조", "최대 난방").any { ensureTile(it, 6)?.contains("끄기") == true }
 
     private fun readCarState(): Pair<String, String> = try {
-        if (tileState("문") == null) "" to ""
+        val ds = ensureTile("문", 5)
+        if (ds == null) "" to ""
         else {
-            val d = tileState("문")?.let { if (it.contains("해제")) "locked" else "unlocked" } ?: ""
+            val d = if (ds.contains("해제")) "locked" else "unlocked"
             d to (if (engineIsOn()) "on" else "off")
         }
     } catch (e: Exception) {
@@ -220,10 +221,18 @@ class MacroAccessibilityService : AccessibilityService() {
         log("기아 앱 실행")
 
         val end = System.currentTimeMillis() + 35_000
+        var lastTabClick = 0L
         while (System.currentTimeMillis() < end) {
             handleInterrupts()
-            if (tileState("시동/공조") != null || tileState("문") != null) return
-            bottomTab("제어")?.let { click(it); Thread.sleep(1200) }
+            if (tileState("시동/공조") != null || tileState("문") != null) {
+                // 기아 앱은 제어 탭에 들어오면 스스로 새로고침하며 화면을 밀었다 올림 → 멈출 때까지 대기
+                waitSettled()
+                return
+            }
+            // 탭을 계속 누르면 새로고침이 반복되므로 4초에 한 번만
+            if (System.currentTimeMillis() - lastTabClick > 4000) {
+                bottomTab("제어")?.let { click(it); lastTabClick = System.currentTimeMillis() }
+            }
             Thread.sleep(500)
         }
         throw Fail(Protocol.CODE_FAIL, "기아 앱 '제어' 화면을 열지 못했어요")
@@ -264,8 +273,63 @@ class MacroAccessibilityService : AccessibilityService() {
         return subtreeTexts(tile).filter { norm(it) != norm(label) }.joinToString(" ")
     }
 
+    /** 화면 움직임(새로고침·애니메이션)이 멈출 때까지 기다림 */
+    private fun waitSettled(maxMs: Long = 6000) {
+        val end = System.currentTimeMillis() + maxMs
+        var last = snapshot()
+        var stable = 0
+        while (System.currentTimeMillis() < end) {
+            Thread.sleep(400)
+            val now = snapshot()
+            if (now == last) { if (++stable >= 2) return } else stable = 0
+            last = now
+        }
+    }
+
+    private fun snapshot(): String {
+        val r = Rect()
+        return visibleNodes().mapNotNull { n ->
+            val t = nodeText(n) ?: return@mapNotNull null
+            n.getBoundsInScreen(r); "$t@${r.top}"
+        }.joinToString("|")
+    }
+
+    /**
+     * 타일을 화면에 보이게 한 뒤 상태 문구 반환. 작은 화면(픽셀1)에서는 아래 줄 타일이
+     * 메뉴 바 밑이나 화면 밖에 있을 수 있어 기다리기 → 화면에 보이게 요청 → 스크롤 순서로 찾는다.
+     */
+    private fun ensureTile(label: String, timeoutSec: Int = 12): String? {
+        tileState(label)?.let { return it }
+        val end = System.currentTimeMillis() + timeoutSec * 1000L
+        var forward = 0
+        var backward = 0
+        while (System.currentTimeMillis() < end) {
+            waitSettled(3000)
+            tileState(label)?.let { return it }
+            // 트리에는 있는데 화면 밖이면 보이게 해 달라고 요청
+            allNodes().firstOrNull { exact(it, label) }?.let { n ->
+                (clickableOf(n) ?: n).performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+                Thread.sleep(600)
+                tileState(label)?.let { return it }
+            }
+            val r = Rect()
+            val scroller = allNodes().filter { it.isScrollable }
+                .maxByOrNull { it.getBoundsInScreen(r); r.width() * r.height() }
+            when {
+                scroller == null -> Thread.sleep(500)
+                forward < 3 -> { forward++; if (!scroller.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) forward = 3 }
+                backward < 4 -> { backward++; scroller.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) }
+                else -> { forward = 0; backward = 0 }
+            }
+            Thread.sleep(500)
+        }
+        log("'$label' 버튼을 ${timeoutSec}초 동안 찾지 못함")
+        return null
+    }
+
     /** 타일 누르기 → (확인 팝업/PIN 처리) → 결과 대기 */
     private fun pressAndWait(label: String, reached: (String) -> Boolean): Result {
+        ensureTile(label) ?: throw Fail(Protocol.CODE_FAIL, "'$label' 버튼을 찾지 못했어요")
         val n = visibleNodes().firstOrNull { exact(it, label) }
             ?: throw Fail(Protocol.CODE_FAIL, "'$label' 버튼을 찾지 못했어요")
         val since = System.currentTimeMillis()
@@ -400,7 +464,7 @@ class MacroAccessibilityService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(900)
             if (visibleNodes().none { exact(it, "희망 온도") }) {
                 // 뒤로 가기로 설정 화면까지 나갔으면 다시 들어감
-                if (tileState("시동/공조") == null) openControlTab()
+                if (ensureTile("시동/공조", 6) == null) openControlTab()
                 val e2 = findWithScroll { exact(it, "시동 / 공조 설정") } ?: break
                 click(clickableOf(e2) ?: e2)
                 waitNode(8) { visibleNodes().firstOrNull { exact(it, "희망 온도") } } ?: break
@@ -417,7 +481,7 @@ class MacroAccessibilityService : AccessibilityService() {
             if (tileState("시동/공조") != null) return
             performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(900)
         }
-        if (tileState("시동/공조") == null) openControlTab()
+        if (ensureTile("시동/공조", 6) == null) openControlTab()
     }
 
     private fun tempValue(s: String): Double? {
