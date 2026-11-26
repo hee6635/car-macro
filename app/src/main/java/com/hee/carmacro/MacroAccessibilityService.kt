@@ -13,6 +13,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -97,6 +98,7 @@ class MacroAccessibilityService : AccessibilityService() {
 
     fun run(cmd: String, prefs: Prefs, onProgress: (String) -> Unit = {}): Result {
         progress = onProgress
+        popupCount = 0
         if (!busy.compareAndSet(false, true)) return Result(Protocol.CODE_FAIL, "이미 다른 명령을 실행 중이에요")
         kiaPkg = prefs.targetPackage
         pin = prefs.pin
@@ -264,11 +266,89 @@ class MacroAccessibilityService : AccessibilityService() {
             throw Fail(Protocol.CODE_LOGIN, "기아 앱이 로그아웃됐어요. 픽셀1에서 다시 로그인해 주세요.")
         }
         if (norm.any { it.contains("간편비밀번호") }) enterPin()
+        handlePopup()
+    }
+
+    private var popupCount = 0
+
+    /** 기아 앱의 팝업 창(메인 화면 위에 따로 뜬 창). 없으면 null */
+    private fun popupRoot(): AccessibilityNodeInfo? {
+        val ws = try { windows } catch (e: Exception) { return null }
+        val app = ws.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.root?.packageName == kiaPkg }
+        if (app.size < 2) return null
+        return app.maxByOrNull { it.layer }?.root
+    }
+
+    private fun exact2(t: String, w: String) = norm(t) == norm(w)
+
+    private fun popupTitle(root: AccessibilityNodeInfo?): String =
+        (if (root != null) subtreeTexts(root) else allTexts()).firstOrNull { it.length >= 2 }?.take(24) ?: "팝업"
+
+    /** '창문 닫기' 같은 제어 버튼 안에 있는 글자인지 (팝업 닫기로 착각하면 안 됨) */
+    private fun isControlTile(n: AccessibilityNodeInfo): Boolean {
+        val c = clickableOf(n) ?: return false
+        return subtreeTexts(c).any { t -> CONTROL_LABELS.any { norm(t) == norm(it) } }
+    }
+
+    /**
+     * 광고/공지 팝업 닫기. 순서:
+     * ① '오늘 하루 보지 않기' 같은 버튼 → ② 팝업 안의 X·닫기 → ③ 뒤로 가기 → ④ 화면 위쪽 빈 곳 누르기
+     * 팝업을 닫았으면 true
+     */
+    private fun handlePopup(aggressive: Boolean = true): Boolean {
+        if (popupCount >= 8) return false
+        // 간편비밀번호 화면은 팝업이 아님 (X를 누르면 명령이 취소됨)
+        if (allTexts().any { norm(it).contains("간편비밀번호") }) return false
+        // ① 다시 안 뜨게 하는 버튼 (어느 창이든, 짧은 버튼 글자만)
         for (w in POPUP_DISMISS) {
-            visibleNodes().firstOrNull { exact(it, w) }?.let {
-                log("팝업 닫기: $w"); click(it); Thread.sleep(600); return
+            val n = visibleNodes().firstOrNull { node ->
+                val t = nodeText(node)?.let { norm(it) } ?: return@firstOrNull false
+                t.contains(norm(w)) && t.length <= norm(w).length + 6 && clickableOf(node) != null && !isControlTile(node)
+            }
+            if (n != null) {
+                val title = popupTitle(popupRoot())
+                log("팝업 닫기 ($w): $title"); progress("광고 팝업 닫음: $title")
+                click(clickableOf(n) ?: n); popupCount++; Thread.sleep(800); return true
             }
         }
+        val root = popupRoot() ?: return false
+        val rootTexts = subtreeTexts(root)
+        // 기아의 확인/취소 질문 창은 건드리지 않음 (결과 대기 중 '확인'은 따로 처리)
+        if (rootTexts.any { exact2(it, "취소") } && rootTexts.any { exact2(it, "확인") }) return false
+        val title = popupTitle(root)
+        // ② 팝업 창 안의 X / 닫기
+        val inPopup = mutableListOf<AccessibilityNodeInfo>()
+        walk(root, inPopup)
+        val closeBtn = inPopup.filter { it.isVisibleToUser }.firstOrNull { n ->
+            val t = (n.text ?: "").toString().trim(); val d = (n.contentDescription ?: "").toString().trim()
+            CLOSE_WORDS.any { w -> t.equals(w, true) || d.equals(w, true) } || d.contains("닫기") || d.contains("close", true)
+        } ?: run {
+            // 글자 없는 X 아이콘: 팝업 오른쪽 위 구석의 작은 버튼
+            val pr = Rect().also { root.getBoundsInScreen(it) }
+            val r = Rect()
+            inPopup.filter { it.isVisibleToUser && it.isClickable && it.text.isNullOrBlank() }.firstOrNull { n ->
+                n.getBoundsInScreen(r)
+                r.width() < pr.width() / 4 && r.centerX() > pr.left + pr.width() * 3 / 4 && r.centerY() < pr.top + pr.height() / 4
+            }
+        }
+        if (closeBtn != null) {
+            log("팝업 X/닫기: $title"); progress("광고 팝업 닫음: $title")
+            click(clickableOf(closeBtn) ?: closeBtn); popupCount++; Thread.sleep(800); return true
+        }
+        // 결과를 기다리는 중에는 뒤로 가기/바깥 누르기를 하지 않음 (요청이 취소될 수 있음)
+        if (!aggressive) return false
+        // ③ 뒤로 가기
+        log("팝업 뒤로 가기: $title")
+        performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(800)
+        if (popupRoot() == null) { progress("광고 팝업 닫음: $title"); popupCount++; return true }
+        // ④ 화면 위쪽 가운데 빈 곳 (제목 줄, 버튼 없음) 누르기
+        val top = (resources.displayMetrics.density * 56).toInt()
+        tap(resources.displayMetrics.widthPixels / 2f, top.toFloat())
+        Thread.sleep(800)
+        popupCount++
+        if (popupRoot() == null) { log("팝업 바깥 눌러 닫음: $title"); progress("광고 팝업 닫음: $title"); return true }
+        log("팝업을 닫지 못함: $title")
+        return false
     }
 
     // ═════════════════════════ 타일 조작 ═════════════════════════
@@ -312,6 +392,7 @@ class MacroAccessibilityService : AccessibilityService() {
         var backward = 0
         while (System.currentTimeMillis() < end) {
             waitSettled(3000)
+            if (handlePopup()) waitSettled(2000)
             tileState(label)?.let { return it }
             // 트리에는 있는데 화면 밖이면 보이게 해 달라고 요청
             allNodes().firstOrNull { exact(it, label) }?.let { n ->
@@ -354,7 +435,8 @@ class MacroAccessibilityService : AccessibilityService() {
         progress("차 응답 기다리는 중")
         while (System.currentTimeMillis() < end) {
             if (requested && !reported) { reported = true; progress("차 응답 기다리는 중 (기아: 차량 제어를 요청했습니다)") }
-            // PIN / 확인 팝업
+            // 광고 팝업 / PIN / 확인 팝업
+            handlePopup(aggressive = false)
             val texts = allTexts()
             if (texts.any { norm(it).contains("간편비밀번호") }) enterPin()
             visibleNodes().firstOrNull { exact(it, "확인") && clickableOf(it) != null }?.let {
@@ -766,7 +848,16 @@ class MacroAccessibilityService : AccessibilityService() {
         @Volatile var instance: MacroAccessibilityService? = null
 
         /** 앱 시작 시 뜨는 공지/광고 팝업 닫기 문구 ('닫기'는 창문 닫기 버튼과 겹쳐서 쓰지 않음) */
-        private val POPUP_DISMISS = listOf("오늘 하루 보지 않기", "다시 보지 않기", "다음에 하기", "나중에", "오늘 그만 보기")
+        /** 다시 안 뜨게 하는 버튼 (공백 무시, 포함 검사) */
+        private val POPUP_DISMISS = listOf(
+            "오늘 하루 보지 않기", "오늘 하루 열지 않기", "오늘 하루 그만 보기", "오늘은 그만 보기", "오늘 그만 보기",
+            "오늘은 그만", "오늘 보지 않기", "다시 보지 않기", "다시 열지 않기", "다시 열지 않음", "다시 보지 않음",
+            "일주일간 보지 않기", "7일간 보지 않기", "다음에 하기", "다음에", "나중에 하기", "나중에",
+        )
+        /** 팝업 창 안에서만 누르는 닫기 버튼 */
+        private val CLOSE_WORDS = listOf("닫기", "X", "✕", "×", "close", "창 닫기", "팝업 닫기")
+        /** 제어 화면 버튼 라벨 ('창문 닫기' 등과 헷갈리지 않게) */
+        private val CONTROL_LABELS = listOf("문", "창문", "시동/공조", "최대 난방", "최대 냉방", "비상등", "비상등/경적")
         private val SAVE_WORDS = listOf("저장", "적용", "확인", "완료", "설정 완료")
         private val OK_WORDS = listOf("열렸습니다", "잠겼습니다", "켜졌습니다", "꺼졌습니다", "걸렸습니다", "시작되었습니다", "완료되었습니다", "성공")
         private val FAIL_WORDS = listOf("실패", "할 수 없", "없습니다", "오류", "불가", "다시 시도", "확인해 주세요", "응답이 없")
