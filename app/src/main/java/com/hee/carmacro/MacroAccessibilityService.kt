@@ -114,7 +114,8 @@ class MacroAccessibilityService : AccessibilityService() {
                     startWithPreset(prefs.preset(Prefs.presetOf(cmd)))
                 Prefs.CMD_START_MAX -> startMax()
                 Prefs.CMD_STOP -> stop()
-                Prefs.CMD_CHECK -> Result(Protocol.CODE_OK, "기아 앱 로그인 정상")
+                Prefs.CMD_CHECK -> Result(Protocol.CODE_OK, "기아 앱 로그인 정상 · 제어 화면 확인")
+                Prefs.CMD_READ_OPTIONS -> readOptions(prefs)
                 else -> throw Fail(Protocol.CODE_FAIL, "알 수 없는 명령: $cmd")
             }
             // 마지막으로 화면에 보이는 문/시동 상태를 함께 보고
@@ -366,6 +367,49 @@ class MacroAccessibilityService : AccessibilityService() {
         log("저장 버튼이 없어 뒤로 나감 (자동 저장으로 가정)")
         backToControl()
         return false
+    }
+
+    /** '시동 / 공조 설정'의 하위 화면 선택지를 읽어서 저장 (차는 안 움직임) */
+    private fun readOptions(prefs: Prefs): Result {
+        val entry = findWithScroll { exact(it, "시동 / 공조 설정") }
+            ?: throw Fail(Protocol.CODE_FAIL, "'시동 / 공조 설정' 메뉴를 찾지 못했어요")
+        click(clickableOf(entry) ?: entry)
+        waitNode(10) { visibleNodes().firstOrNull { exact(it, "희망 온도") } }
+            ?: throw Fail(Protocol.CODE_FAIL, "시동/공조 설정 화면이 열리지 않았어요")
+        val out = JSONObject()
+        val found = mutableListOf<String>()
+        for (rowLabel in Prefs.OPTION_ROWS) {
+            val row = findWithScroll { exact(it, rowLabel) } ?: continue
+            val rr = Rect().also { row.getBoundsInScreen(it) }
+            val r = Rect()
+            // 줄에 표시된 현재 값
+            val current = visibleNodes().filter { n ->
+                n.getBoundsInScreen(r); !n.text.isNullOrBlank() && !exact(n, rowLabel) &&
+                    kotlin.math.abs(r.centerY() - rr.centerY()) < rr.height()
+            }.map { it.text.toString().trim() }
+            val before = allTexts().toSet()
+            click(clickableOf(row) ?: row)
+            Thread.sleep(1500)
+            val skip = setOf("적용", "확인", "취소", "닫기", "저장", "완료", rowLabel)
+            val opts = visibleNodes().filter { clickableOf(it) != null && !it.text.isNullOrBlank() }
+                .map { it.text.toString().trim() }
+                .filter { it !in skip && (it !in before || it in current) }
+                .distinct()
+            if (opts.isNotEmpty()) { out.put(rowLabel, org.json.JSONArray(opts)); found += "$rowLabel ${opts.size}개" }
+            log("$rowLabel 선택지: $opts")
+            performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(900)
+            if (visibleNodes().none { exact(it, "희망 온도") }) {
+                // 뒤로 가기로 설정 화면까지 나갔으면 다시 들어감
+                if (tileState("시동/공조") == null) openControlTab()
+                val e2 = findWithScroll { exact(it, "시동 / 공조 설정") } ?: break
+                click(clickableOf(e2) ?: e2)
+                waitNode(8) { visibleNodes().firstOrNull { exact(it, "희망 온도") } } ?: break
+            }
+        }
+        if (out.length() == 0) throw Fail(Protocol.CODE_FAIL, "선택지를 읽지 못했어요. 프리셋에서 직접 입력하세요.")
+        prefs.kiaOptions = out.toString()
+        backToControl()
+        return Result(Protocol.CODE_OK, "선택지 읽음: ${found.joinToString(", ")}")
     }
 
     private fun backToControl() {

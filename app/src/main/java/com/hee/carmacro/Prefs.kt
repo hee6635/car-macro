@@ -23,6 +23,16 @@ data class Preset(
     val isEmpty get() = temp.isEmpty() && defrost < 0 && mirror < 0 && wheel < 0 &&
         seat.isEmpty() && duration.isEmpty() && mode.isEmpty()
 
+    /** 확인 창 등에 보여줄 한 줄 요약 */
+    fun summary(): String {
+        fun tri(name: String, v: Int) = when (v) { 1 -> "$name 켬"; 0 -> "$name 끔"; else -> null }
+        return listOfNotNull(
+            temp.ifEmpty { null }?.let { if (it.toDoubleOrNull() != null) "희망 온도 ${it}℃" else "희망 온도 $it" },
+            tri("성에 제거", defrost), tri("미러·뒷유리 열선", mirror), tri("핸들 열선", wheel),
+            seat.ifEmpty { null }?.let { "시트 $it" }, duration.ifEmpty { null }, mode.ifEmpty { null }?.let { "공조 $it" },
+        ).joinToString(", ").ifEmpty { "기아 앱 설정 그대로" }
+    }
+
     val minutes: Int get() = Regex("(\\d+)").find(duration)?.value?.toIntOrNull() ?: 0
 
     companion object {
@@ -100,6 +110,22 @@ class Prefs(context: Context) {
     var lastLoginCheckDay: String
         get() = s("login_check_day")
         set(v) = put("login_check_day", v)
+
+    var setupDone: Boolean
+        get() = b("setup_done")
+        set(v) = putB("setup_done", v)
+
+    /** 기아 앱 하위 화면 선택지: {"시동 유지 시간":["2분","10분"...], ...} */
+    var kiaOptions: String
+        get() = s("kia_options", "{}")
+        set(v) = put("kia_options", v)
+
+    fun kiaOptionList(row: String): List<String> = try {
+        val a = JSONObject(kiaOptions).optJSONArray(row) ?: org.json.JSONArray()
+        (0 until a.length()).map { a.getString(it) }
+    } catch (e: Exception) {
+        emptyList()
+    }
 
     var lastDump: String
         get() = s("last_dump")
@@ -187,6 +213,9 @@ class Prefs(context: Context) {
         const val CMD_STOP = "stop"
         const val CMD_CHECK = "check"      // 기아 앱 로그인 점검 (수신기 내부용)
         const val CMD_SIGNAL = "signal"    // 퇴근 신호: 진동만, 전송 안 함
+        const val CMD_READ_OPTIONS = "read_options"  // 기아 앱 선택지 읽기 (수신기 내부용)
+
+        val OPTION_ROWS = listOf("시동 유지 시간", "공조 모드", "시트 열선 / 통풍")
 
         val CAR_CMDS = setOf(CMD_UNLOCK, CMD_LOCK, CMD_START1, CMD_START2, CMD_START3, CMD_START_MAX, CMD_STOP)
 
@@ -204,7 +233,8 @@ class Prefs(context: Context) {
             CMD_START1, CMD_START2, CMD_START3 -> "시동 · ${PRESET_NAMES[presetOf(cmd)]}"
             CMD_START_MAX -> "시동 · 최대 난방"
             CMD_STOP -> "시동 끄기"
-            CMD_CHECK -> "기아 앱 점검"
+            CMD_CHECK -> "기아 앱 연결 테스트"
+            CMD_READ_OPTIONS -> "기아 앱 선택지 읽기"
             else -> cmd
         }
 

@@ -58,6 +58,7 @@ class ReceiverService : Service() {
             statusThread = Thread({ statusLoop() }, "receiver-status").apply { start() }
         }
         intent?.getStringExtra(EXTRA_LOCAL_CMD)?.let { enqueue(it, null) }
+        if (intent?.getBooleanExtra(EXTRA_PUBLISH, false) == true) worker.execute { publishStatus() }
         return START_STICKY
     }
 
@@ -137,7 +138,7 @@ class ReceiverService : Service() {
     }
 
     /** 명령은 한 번에 하나씩 순서대로. id == null 이면 픽셀1에서 직접 실행(테스트/점검) */
-    private fun enqueue(cmd: String, id: String?) {
+    private fun enqueue(cmd: String, id: String?, isAuto: Boolean = false) {
         pending++
         worker.execute {
             try {
@@ -152,6 +153,13 @@ class ReceiverService : Service() {
                     Protocol.CODE_OK -> "✅ "; Protocol.CODE_ALREADY -> "ℹ️ "; else -> "❌ "
                 } + Prefs.cmdLabel(cmd) + if (id == null) " (픽셀1 테스트)" else ""
                 Notifier.result(this, title, r.message, Notifier.ID_RESULT)
+                val src = when {
+                    id != null -> "내 폰에서 받음"
+                    cmd == Prefs.CMD_CHECK && isAuto -> "자동 점검"
+                    else -> "픽셀1에서 테스트"
+                }
+                val detail = if (Prefs.presetOf(cmd) > 0) "${prefs.preset(Prefs.presetOf(cmd)).summary()} → ${r.message}" else r.message
+                prefs.addHistory(src, title.removeSuffix(" (픽셀1 테스트)"), detail)
                 if (r.code == Protocol.CODE_LOGIN) publishStatus()
             } finally {
                 pending--
@@ -189,7 +197,7 @@ class ReceiverService : Service() {
         if (prefs.targetPackage.isEmpty() || MacroAccessibilityService.instance == null) return
         prefs.lastLoginCheckDay = today
         AppLog.i(this, "[수신기] 매일 기아 앱 로그인 점검")
-        enqueue(Prefs.CMD_CHECK, null)
+        enqueue(Prefs.CMD_CHECK, null, isAuto = true)
         worker.execute { publishStatus() }
     }
 
@@ -209,6 +217,7 @@ class ReceiverService : Service() {
             put("kia", prefs.kiaLogin)
             put("a11y", MacroAccessibilityService.instance != null)
             put("door", prefs.door); put("doorTime", prefs.doorTime)
+            put("presets", JSONObject().apply { for (n in 1..3) put(n.toString(), prefs.preset(n).summary()) })
         }.toString()
         try {
             Ntfy.publish(prefs.server, prefs.topic, Protocol.encode(Msg("status", "", Protocol.newId(), data = data), prefs.secret))
@@ -221,6 +230,7 @@ class ReceiverService : Service() {
 
     companion object {
         const val EXTRA_LOCAL_CMD = "local_cmd"
+        const val EXTRA_PUBLISH = "publish_status"
         const val STATUS_INTERVAL_MS = 15 * 60_000L
 
         fun start(ctx: Context) {
@@ -231,6 +241,12 @@ class ReceiverService : Service() {
         fun stop(ctx: Context) {
             Prefs(ctx).receiverEnabled = false
             ctx.stopService(Intent(ctx, ReceiverService::class.java))
+        }
+
+        /** 프리셋 등이 바뀌었을 때 상태 신호를 바로 보내기 (수신 중일 때만) */
+        fun publishNow(ctx: Context) {
+            if (!Prefs(ctx).receiverEnabled) return
+            ctx.startForegroundService(Intent(ctx, ReceiverService::class.java).putExtra(EXTRA_PUBLISH, true))
         }
 
         /** 픽셀1에서 직접 테스트 실행 (수신 서비스 큐를 통해 순서대로) */
