@@ -73,6 +73,33 @@ object Notifier {
             .build()
     }
 
+    /** 문 열기 성공: 위쪽 팝업과 알림창에서 '자동 잠김까지' 초가 줄어듦 */
+    fun unlocked(ctx: Context, msg: String, source: String, lockAt: Long): Notification {
+        ensureChannels(ctx)
+        return Notification.Builder(ctx, CH_RESULT)
+            .setSmallIcon(R.drawable.ic_car)
+            .setContentTitle("✅ 문 열기 성공 · 자동 잠김까지")
+            .setContentText("30초 안에 문을 열지 않으면 다시 잠겨요")
+            .setStyle(Notification.BigTextStyle().bigText("30초 안에 문을 열지 않으면 다시 잠겨요\n$msg ($source)"))
+            .setWhen(lockAt).setShowWhen(true)
+            .setUsesChronometer(true).setChronometerCountDown(true)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx))
+            .build()
+    }
+
+    /** 30초가 지난 뒤 (조용히 내용만 바꿈) */
+    fun lockTimeout(ctx: Context): Notification {
+        ensureChannels(ctx)
+        return Notification.Builder(ctx, CH_SERVICE)
+            .setSmallIcon(R.drawable.ic_car)
+            .setContentTitle("문 상태 모름")
+            .setContentText("문을 열지 않았다면 자동으로 다시 잠겼어요")
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx))
+            .build()
+    }
+
     fun notify(ctx: Context, id: Int, n: Notification) {
         try {
             ctx.getSystemService(NotificationManager::class.java).notify(id, n)

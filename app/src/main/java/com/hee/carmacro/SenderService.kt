@@ -135,7 +135,11 @@ class SenderService : Service() {
                     Notifier.result(this, "기아 앱 다시 로그인 필요",
                         "픽셀1의 기아 앱이 로그아웃됐어요. 픽셀1에서 로그인해 주세요.", Notifier.ID_WARN_LOGIN, Notifier.CH_WARN)
                 }
-                finish(prefs, label, r.ok, r.msg, source, already = code == Protocol.CODE_ALREADY)
+                if (cmd == Prefs.CMD_UNLOCK && code == Protocol.CODE_OK) {
+                    finish(prefs, label, true, r.msg, source)   // 기록 남기기
+                    AutoLockWorker.schedule(this, nid)
+                    Notifier.unlocked(this, r.msg, source, prefs.doorTime + Prefs.AUTO_LOCK_MS)
+                } else finish(prefs, label, r.ok, r.msg, source, already = code == Protocol.CODE_ALREADY)
             }
             gotAck -> finish(prefs, label, false, "픽셀1이 받았지만 결과가 오지 않았어요. 기아 앱을 직접 확인하세요.", source)
             else -> finish(prefs, label, false, "픽셀1이 응답하지 않아요. 기아 앱으로 직접 해 주세요. (픽셀1 전원/인터넷 확인)", source)

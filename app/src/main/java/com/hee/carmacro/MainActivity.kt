@@ -40,9 +40,13 @@ class MainActivity : Activity() {
     /** 상태판 화면은 설정 값이 바뀌면 다시 그림 */
     private val liveScreens = setOf("home", "pixelHome", "pixelSetup", "pair", "dump", "log", "history")
     private var engineText: TextView? = null
+    private var doorText: TextView? = null
+    private var doorSub: TextView? = null
     private val ticker = object : Runnable {
         override fun run() {
             engineText?.text = engineLine()
+            doorText?.text = doorLine().first
+            doorSub?.text = doorLine().second
             handler.postDelayed(this, 1000)
         }
     }
@@ -105,7 +109,7 @@ class MainActivity : Activity() {
     private fun reset(s: String) { stack.clear(); stack.add(s); render() }
 
     private fun render() {
-        engineText = null
+        engineText = null; doorText = null; doorSub = null
         when (current()) {
             "role" -> roleScreen()
             "pair" -> pairScreen()
@@ -233,6 +237,22 @@ class MainActivity : Activity() {
 
     private fun pixelStatus(): JSONObject = try { JSONObject(prefs.pixelStatus) } catch (e: Exception) { JSONObject() }
 
+    /** 문 카드 (제목, 설명). 열린 뒤 30초는 '자동 잠김까지' 카운트다운 */
+    private fun doorLine(): Pair<String, String> {
+        val since = System.currentTimeMillis() - prefs.doorTime
+        return when {
+            prefs.door == "unlocked" && since < Prefs.AUTO_LOCK_MS -> {
+                val left = (Prefs.AUTO_LOCK_MS - since + 999) / 1000
+                "문 열림" to "자동 잠김까지 0:%02d".format(left)
+            }
+            prefs.door == "unlocked" && since < 10 * 60_000L -> "문 상태 모름" to "열지 않았다면 자동으로 잠겼어요"
+            prefs.door == "unlocked" -> "문 상태 모름" to "${ago(prefs.doorTime)} 열림 기록"
+            prefs.door == "locked" -> "문 잠김" to "${ago(prefs.doorTime)} 기준"
+            prefs.doorTime > 0 -> "문 상태 모름" to "열지 않았다면 자동으로 잠겼어요"
+            else -> "문 상태 모름" to "명령을 실행하면 알 수 있어요"
+        }
+    }
+
     private fun engineLine(): String = if (prefs.engineRunning()) {
         if (prefs.engineMinutes > 0) {
             val left = (prefs.engineStart + prefs.engineMinutes * 60_000L - System.currentTimeMillis()) / 1000
@@ -283,8 +303,9 @@ class MainActivity : Activity() {
         // 차 상태
         val cr = row()
         val door = col(8).apply { background = bg(Ui.CARD, 18, Ui.BORDER); setPadding(dp(16), dp(14), dp(16), dp(14)) }
-        door.addView(text(when (prefs.door) { "locked" -> "문 잠김"; "unlocked" -> "문 열림"; else -> "문 상태 모름" }, 18f, Ui.TEXT, bold = true))
-        door.addView(text(if (prefs.doorTime > 0) "${ago(prefs.doorTime)} 기준" else "명령을 실행하면 알 수 있어요", 12f, Ui.SUB))
+        val (dl, ds) = doorLine()
+        val dt = text(dl, 18f, Ui.TEXT, bold = true); doorText = dt; door.addView(dt)
+        val dsub = text(ds, 12f, Ui.SUB); doorSub = dsub; door.addView(dsub)
         val running = prefs.engineRunning()
         val eng = col(8).apply {
             background = if (running) bg(Ui.ORANGE_BG, 18, Ui.ORANGE) else bg(Ui.CARD, 18, Ui.BORDER)

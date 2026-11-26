@@ -203,6 +203,8 @@ class Prefs(context: Context) {
         const val MODE_SENDER = "sender"
         const val MODE_RECEIVER = "receiver"
         const val DEFAULT_SERVER = "https://ntfy.sh"
+        /** 기아는 문을 열고 30초 안에 문을 안 열면 다시 잠금 */
+        const val AUTO_LOCK_MS = 30_000L
 
         const val CMD_UNLOCK = "unlock"
         const val CMD_LOCK = "lock"

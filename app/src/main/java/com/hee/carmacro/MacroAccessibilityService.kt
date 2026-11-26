@@ -149,7 +149,7 @@ class MacroAccessibilityService : AccessibilityService() {
         val isLocked = state.contains("해제")   // 잠겨 있으면 버튼이 '잠금 해제'
         if (unlock && !isLocked) return Result(Protocol.CODE_ALREADY, "이미 열려 있어요", door = "unlocked")
         if (!unlock && isLocked) return Result(Protocol.CODE_ALREADY, "이미 잠겨 있어요", door = "locked")
-        val r = pressAndWait("문") { s -> if (unlock) !s.contains("해제") else s.contains("해제") }
+        val r = pressAndWait("문", if (unlock) "문이 열렸어요" else "문이 잠겼어요") { s -> if (unlock) !s.contains("해제") else s.contains("해제") }
         return r.copy(door = if (r.code == Protocol.CODE_OK) (if (unlock) "unlocked" else "locked") else "")
     }
 
@@ -158,24 +158,24 @@ class MacroAccessibilityService : AccessibilityService() {
         if (engineIsOn()) return Result(Protocol.CODE_ALREADY, "이미 시동이 켜져 있어요", engine = "on")
         var startedInSettings = false
         if (!p.isEmpty) startedInSettings = applyPreset(p)
-        val r = if (startedInSettings) waitResult(null) { true }
+        val r = if (startedInSettings) waitResult(null, "시동이 걸렸어요") { true }
         else {
             if (ensureTile("시동/공조", 6) == null) openControlTab()
-            pressAndWait("시동/공조") { it.contains("끄기") }
+            pressAndWait("시동/공조", "시동이 걸렸어요") { it.contains("끄기") }
         }
         return r.copy(engine = if (r.code == Protocol.CODE_OK) "on" else "", minutes = p.minutes)
     }
 
     private fun startMax(): Result {
         if (engineIsOn()) return Result(Protocol.CODE_ALREADY, "이미 시동이 켜져 있어요", engine = "on")
-        val r = pressAndWait("최대 난방") { it.contains("끄기") }
+        val r = pressAndWait("최대 난방", "최대 난방으로 시동이 걸렸어요") { it.contains("끄기") }
         return r.copy(engine = if (r.code == Protocol.CODE_OK) "on" else "")
     }
 
     private fun stop(): Result {
         val label = listOf("시동/공조", "최대 난방").firstOrNull { ensureTile(it, 6)?.contains("끄기") == true }
             ?: return Result(Protocol.CODE_ALREADY, "이미 시동이 꺼져 있어요", engine = "off")
-        val r = pressAndWait(label) { !it.contains("끄기") }
+        val r = pressAndWait(label, "시동이 꺼졌어요") { !it.contains("끄기") }
         return r.copy(engine = if (r.code == Protocol.CODE_OK) "off" else "")
     }
 
@@ -328,17 +328,17 @@ class MacroAccessibilityService : AccessibilityService() {
     }
 
     /** 타일 누르기 → (확인 팝업/PIN 처리) → 결과 대기 */
-    private fun pressAndWait(label: String, reached: (String) -> Boolean): Result {
+    private fun pressAndWait(label: String, okText: String, reached: (String) -> Boolean): Result {
         ensureTile(label) ?: throw Fail(Protocol.CODE_FAIL, "'$label' 버튼을 찾지 못했어요")
         val n = visibleNodes().firstOrNull { exact(it, label) }
             ?: throw Fail(Protocol.CODE_FAIL, "'$label' 버튼을 찾지 못했어요")
         val since = System.currentTimeMillis()
         log("누름: $label (${tileState(label)})")
         click(clickableOf(n) ?: n)
-        return waitResult(label, since, reached)
+        return waitResult(label, okText, since, reached)
     }
 
-    private fun waitResult(label: String?, since: Long = System.currentTimeMillis(), reached: (String) -> Boolean): Result {
+    private fun waitResult(label: String?, okText: String, since: Long = System.currentTimeMillis(), reached: (String) -> Boolean): Result {
         val end = System.currentTimeMillis() + 90_000
         var requested = false
         while (System.currentTimeMillis() < end) {
@@ -363,7 +363,7 @@ class MacroAccessibilityService : AccessibilityService() {
             // 타일 상태가 바뀌었으면 성공으로 봄
             if (label != null) {
                 val s = tileState(label)
-                if (s != null && reached(s)) return Result(Protocol.CODE_OK, "기아 앱에 '$label $s' 로 표시됨")
+                if (s != null && reached(s)) return Result(Protocol.CODE_OK, "$okText (기아 앱 상태로 확인)")
             }
             Thread.sleep(700)
         }
