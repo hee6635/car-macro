@@ -37,7 +37,7 @@ class SenderService : Service() {
         synchronized(this) {
             val note = fgNote
             if (worker != null && note != null) startFg(fgId, note)   // 진행 중인 알림 유지
-            else startFg(Notifier.ID_CMD_BASE, Notifier.progress(this, "$label 준비 중", "잠시만요", 1))
+            else startFg(Notifier.ID_CMD_BASE, Notifier.progress(this, "$label 준비 중", "잠시만요", 1, popup = false))
             if (!duplicate) queue.add(cmd to source)
             if (worker == null) worker = Thread({ loop() }, "sender").apply { start() }
         }
@@ -66,7 +66,7 @@ class SenderService : Service() {
             val (cmd, source) = next
             val nid = Notifier.ID_CMD_BASE + (++seq)
             val label = Prefs.cmdLabel(cmd)
-            startFg(nid, Notifier.progress(this, "$label 전송 중", source, 1))
+            startFg(nid, Notifier.progress(this, "🚗 $label", "전송 중 · $source", 1))
             lastFinal?.let { Notifier.notify(this, it.first, it.second) }
             lastFinal = nid to send(cmd, label, source, nid)
         }
@@ -75,7 +75,7 @@ class SenderService : Service() {
     }
 
     private fun stage(nid: Int, label: String, text: String, step: Int) {
-        val n = Notifier.progress(this, label, text, step)
+        val n = Notifier.progress(this, "🚗 " + label.removeSuffix(" 진행 중"), text, step)
         if (nid == fgId) fgNote = n
         Notifier.notify(this, nid, n)
     }

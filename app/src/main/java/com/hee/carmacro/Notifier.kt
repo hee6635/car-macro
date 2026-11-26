@@ -11,6 +11,7 @@ object Notifier {
     const val CH_SERVICE = "service"
     const val CH_RESULT = "result"
     const val CH_WARN = "warn"
+    const val CH_PROGRESS = "progress_popup"
 
     const val ID_RECEIVER_FG = 20
     const val ID_RESULT = 30
@@ -24,6 +25,11 @@ object Notifier {
         nm.createNotificationChannel(NotificationChannel(CH_SERVICE, "진행 상태", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(
             NotificationChannel(CH_RESULT, "실행 결과", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true) }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CH_PROGRESS, "명령 진행 (팝업)", NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null); enableVibration(false)
+            }
         )
         nm.createNotificationChannel(
             NotificationChannel(CH_WARN, "픽셀1 경고", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true) }
@@ -47,9 +53,9 @@ object Notifier {
     }
 
     /** 명령 진행 알림: step 1 전송, 2 픽셀1 받음, 3 차 응답 */
-    fun progress(ctx: Context, title: String, text: String, step: Int): Notification {
+    fun progress(ctx: Context, title: String, text: String, step: Int, popup: Boolean = true): Notification {
         ensureChannels(ctx)
-        return Notification.Builder(ctx, CH_SERVICE)
+        return Notification.Builder(ctx, if (popup) CH_PROGRESS else CH_SERVICE)
             .setSmallIcon(R.drawable.ic_car)
             .setContentTitle(title)
             .setContentText(text)

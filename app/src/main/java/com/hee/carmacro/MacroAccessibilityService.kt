@@ -77,12 +77,20 @@ class MacroAccessibilityService : AccessibilityService() {
             type != AccessibilityEvent.TYPE_ANNOUNCEMENT &&
             type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
         ) return
-        val sb = StringBuilder(e.text.joinToString(" "))
-        (e.parcelableData as? Notification)?.extras?.let { x ->
-            listOf(Notification.EXTRA_TITLE, Notification.EXTRA_TEXT, Notification.EXTRA_BIG_TEXT)
-                .forEach { k -> x.getCharSequence(k)?.let { sb.append(' ').append(it) } }
+        // 알림의 제목/본문/펼친 본문/요약에 같은 문장이 겹쳐 들어 있으므로 중복은 빼고 합침
+        val parts = mutableListOf<String>()
+        fun addPart(cs: CharSequence?) {
+            val p = cs?.toString()?.trim()?.replace(Regex("\\s+"), " ") ?: return
+            if (p.isEmpty() || parts.any { it.contains(p) }) return
+            parts.removeAll { p.contains(it) }
+            parts += p
         }
-        val text = sb.toString().trim()
+        val ex = (e.parcelableData as? Notification)?.extras
+        addPart(ex?.getCharSequence(Notification.EXTRA_TITLE))
+        addPart(ex?.getCharSequence(Notification.EXTRA_BIG_TEXT))
+        addPart(ex?.getCharSequence(Notification.EXTRA_TEXT))
+        e.text.forEach { addPart(it) }
+        val text = parts.joinToString(" · ")
         if (text.isEmpty()) return
         synchronized(events) {
             events.addLast(Ev(System.currentTimeMillis(), e.packageName?.toString() ?: "", type, text))
@@ -451,8 +459,8 @@ class MacroAccessibilityService : AccessibilityService() {
             val screenResults = texts.filter { t -> t.contains("원격제어") || OK_WORDS.any { t.contains(it) } }
             for (t in evs + screenResults) {
                 if (t.contains("요청했습니다")) { requested = true; continue }
-                if (FAIL_WORDS.any { t.contains(it) }) return Result(Protocol.CODE_FAIL, "기아: ${t.take(120)}")
-                if (OK_WORDS.any { t.contains(it) }) return Result(Protocol.CODE_OK, "기아: ${t.take(120)}")
+                if (FAIL_WORDS.any { t.contains(it) }) return Result(Protocol.CODE_FAIL, "기아: ${kiaMsg(t)}")
+                if (OK_WORDS.any { t.contains(it) }) return Result(Protocol.CODE_OK, "기아: ${kiaMsg(t)}")
             }
             // 타일 상태가 바뀌었으면 성공으로 봄
             if (label != null) {
@@ -467,6 +475,11 @@ class MacroAccessibilityService : AccessibilityService() {
             else "기아 앱에서 요청이 접수되지 않았어요."
         )
     }
+
+    /** 기아 알림 문구 정리: 제목('원격제어 결과 안내') 빼고 본문만 */
+    private fun kiaMsg(t: String): String =
+        t.split(" · ").map { it.trim() }.filter { it.isNotEmpty() && !it.contains("결과 안내") }
+            .joinToString(" ").ifEmpty { t }.take(120)
 
     private fun enterPin() {
         if (pin.length < 4) throw Fail(Protocol.CODE_FAIL, "간편비밀번호를 물어보는데 픽셀1에 PIN이 설정되지 않았어요")
