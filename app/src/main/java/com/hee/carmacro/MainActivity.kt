@@ -599,9 +599,50 @@ class MainActivity : Activity() {
                 pickOption(rowLabel, value) { v -> set(v); render() }
             }
         }
-        optionRow("시동 유지 시간", p.duration) { update(cur().copy(duration = it)) }
+        // 시동 유지 시간: 그대로 / 2~10분
+        val durSteps = listOf("그대로") + (2..10).map { "${it}분" }
+        var di = durSteps.indexOf(p.duration.ifEmpty { "그대로" }).let { if (it < 0) 0 else it }
+        val dtv = text(durSteps[di], 17f, Ui.TEXT, bold = true).apply { gravity = android.view.Gravity.CENTER; minWidth = dp(64) }
+        fun showDur() { dtv.text = durSteps[di]; update(cur().copy(duration = if (di == 0) "" else durSteps[di])) }
+        val dstep = row()
+        dstep.addView(pill("−") { if (di > 0) { di--; showDur() } }.apply { contentDescription = "시간 줄이기" })
+        dstep.addView(dtv)
+        dstep.addView(pill("+") { if (di < durSteps.size - 1) { di++; showDur() } }.apply { contentDescription = "시간 늘리기" })
+        c1.item("시동 유지 시간", trailing = dstep)
         optionRow("공조 모드", p.mode) { update(cur().copy(mode = it)) }
-        optionRow("시트 열선 / 통풍", p.seat) { update(cur().copy(seat = it)) }
+
+        // 시트 열선 / 통풍
+        val modes = listOf("" to "그대로", "off" to "전체 끔", "heat" to "전체 열선", "vent" to "전체 통풍", "custom" to "좌석별")
+        val modeLabel = modes.firstOrNull { it.first == p.seatMode }?.second ?: "그대로"
+        c1.item("시트 열선 / 통풍", null, text(modeLabel, 15f, if (p.seatMode.isEmpty()) Ui.SUB else Ui.TEXT2)) {
+            dialog().setTitle("시트 열선 / 통풍")
+                .setSingleChoiceItems(modes.map { it.second }.toTypedArray(), modes.indexOfFirst { it.first == p.seatMode }.coerceAtLeast(0)) { d, i ->
+                    update(cur().copy(seatMode = modes[i].first)); d.dismiss(); render()
+                }.setNegativeButton("취소", null).show()
+        }
+        if (p.seatMode == "custom") {
+            val sc = b.card(gap = 0)
+            sc.addView(text("좌석별 단계 (앞좌석: 통풍 3 ~ 끔 ~ 열선 3, 뒷좌석: 끔 ~ 열선 2)", 12f, Ui.SUB).apply { setPadding(0, dp(4), 0, dp(4)) })
+            fun seatRow(name: String, value: Int, min: Int, max: Int, set: (Int) -> Unit) {
+                var v = value.coerceIn(min, max)
+                val tv = text(Preset.seatLevelLabel(v), 15f, if (v > 0) Color2.RED_DOT else if (v < 0) Color2.BLUE_DOT else Ui.SUB, bold = true)
+                    .apply { gravity = android.view.Gravity.CENTER; minWidth = dp(72) }
+                fun show() {
+                    tv.text = Preset.seatLevelLabel(v)
+                    tv.setTextColor(if (v > 0) Color2.RED_DOT else if (v < 0) Color2.BLUE_DOT else Ui.SUB)
+                    set(v)
+                }
+                val st = row()
+                st.addView(pill(if (min < 0) "통풍" else "−") { if (v > min) { v--; show() } }.apply { contentDescription = "$name 줄이기" })
+                st.addView(tv)
+                st.addView(pill("열선") { if (v < max) { v++; show() } }.apply { contentDescription = "$name 열선 올리기" })
+                sc.item(name, trailing = st, divider = sc.childCount > 1)
+            }
+            seatRow("운전석", p.seatDriver, -3, 3) { update(cur().copy(seatDriver = it)) }
+            seatRow("조수석", p.seatPassenger, -3, 3) { update(cur().copy(seatPassenger = it)) }
+            seatRow("후석 좌측", p.seatRearL, 0, 2) { update(cur().copy(seatRearL = it)) }
+            seatRow("후석 우측", p.seatRearR, 0, 2) { update(cur().copy(seatRearR = it)) }
+        }
 
         val c2 = b.card(gap = 0)
         fun tri(label: String, v: Int, set: (Int) -> Unit) {
@@ -615,8 +656,8 @@ class MainActivity : Activity() {
         tri("핸들 열선", p.wheel) { update(cur().copy(wheel = it)) }
 
         val hasOptions = Prefs.OPTION_ROWS.any { prefs.kiaOptionList(it).isNotEmpty() }
-        b.p(if (hasOptions) "유지 시간·공조 모드·시트는 기아 앱에서 읽어 온 선택지에서 골라요."
-            else "유지 시간·공조 모드·시트 선택지를 기아 앱에서 읽어 오면 목록에서 고를 수 있어요. 지금은 직접 입력해요.", size = 12f)
+        b.p(if (hasOptions) "공조 모드는 기아 앱에서 읽어 온 선택지에서 골라요."
+            else "공조 모드 선택지를 기아 앱에서 읽어 오면 목록에서 고를 수 있어요. 지금은 직접 입력해요.", size = 12f)
         b.addView(pill(if (hasOptions) "기아 앱에서 선택지 다시 읽기" else "기아 앱에서 선택지 읽어 오기") {
             if (MacroAccessibilityService.instance == null || prefs.targetPackage.isEmpty()) {
                 toast("기아 앱 선택과 접근성을 먼저 해 주세요")

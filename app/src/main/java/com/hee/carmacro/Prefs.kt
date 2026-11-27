@@ -5,42 +5,73 @@ import android.content.SharedPreferences
 import org.json.JSONObject
 import java.security.SecureRandom
 
-/** 기아 앱 '시동 / 공조 설정'에 적용할 값. 빈 문자열/-1 = 건드리지 않음 */
+/**
+ * 기아 앱 '시동 / 공조 설정'에 적용할 값. 빈 문자열/-1 = 건드리지 않음
+ * 시트: seatMode "" 그대로 / "off" 전체 끔 / "heat" 전체 열선 / "vent" 전체 통풍 / "custom" 좌석별
+ *   좌석별 단계: 앞좌석 -3(통풍3)..0(끔)..3(열선3), 뒷좌석 0..2(열선2)
+ */
 data class Preset(
     val temp: String = "",       // "Low", "High", "25" ...
     val defrost: Int = -1,       // 앞유리 성에 제거   1 켬 / 0 끔 / -1 그대로
     val mirror: Int = -1,        // 사이드 미러 + 뒷유리 열선
     val wheel: Int = -1,         // 핸들 열선
-    val seat: String = "",       // 시트 열선/통풍 하위 화면에서 고를 문구
-    val duration: String = "",   // 시동 유지 시간 하위 화면에서 고를 문구 (예: "10분")
+    val duration: String = "",   // 시동 유지 시간 (예: "10분", 2~10분)
     val mode: String = "",       // 공조 모드 하위 화면에서 고를 문구
+    val seatMode: String = "",
+    val seatDriver: Int = 0,
+    val seatPassenger: Int = 0,
+    val seatRearL: Int = 0,
+    val seatRearR: Int = 0,
 ) {
     fun toJson(): String = JSONObject().apply {
         put("temp", temp); put("defrost", defrost); put("mirror", mirror); put("wheel", wheel)
-        put("seat", seat); put("duration", duration); put("mode", mode)
+        put("duration", duration); put("mode", mode)
+        put("seatMode", seatMode); put("seatDriver", seatDriver); put("seatPassenger", seatPassenger)
+        put("seatRearL", seatRearL); put("seatRearR", seatRearR)
     }.toString()
 
     val isEmpty get() = temp.isEmpty() && defrost < 0 && mirror < 0 && wheel < 0 &&
-        seat.isEmpty() && duration.isEmpty() && mode.isEmpty()
+        duration.isEmpty() && mode.isEmpty() && seatMode.isEmpty()
+
+    /** 좌석 (이름, 단계) 목록 */
+    fun seats() = listOf("운전석" to seatDriver, "조수석" to seatPassenger, "후석 좌측" to seatRearL, "후석 우측" to seatRearR)
+
+    fun seatSummary(): String? = when (seatMode) {
+        "off" -> "시트 전체 끔"
+        "heat" -> "시트 전체 열선"
+        "vent" -> "시트 전체 통풍"
+        "custom" -> seats().filter { it.second != 0 }.joinToString(", ") { (n, v) -> "$n ${seatLevelLabel(v)}" }
+            .ifEmpty { "시트 전체 끔" }
+        else -> null
+    }
 
     /** 확인 창 등에 보여줄 한 줄 요약 */
     fun summary(): String {
         fun tri(name: String, v: Int) = when (v) { 1 -> "$name 켬"; 0 -> "$name 끔"; else -> null }
         return listOfNotNull(
             temp.ifEmpty { null }?.let { if (it.toDoubleOrNull() != null) "희망 온도 ${it}℃" else "희망 온도 $it" },
+            duration.ifEmpty { null }?.let { "유지 $it" },
             tri("성에 제거", defrost), tri("미러·뒷유리 열선", mirror), tri("핸들 열선", wheel),
-            seat.ifEmpty { null }?.let { "시트 $it" }, duration.ifEmpty { null }, mode.ifEmpty { null }?.let { "공조 $it" },
+            seatSummary(), mode.ifEmpty { null }?.let { "공조 $it" },
         ).joinToString(", ").ifEmpty { "기아 앱 설정 그대로" }
     }
 
     val minutes: Int get() = Regex("(\\d+)").find(duration)?.value?.toIntOrNull() ?: 0
 
     companion object {
+        fun seatLevelLabel(v: Int) = when {
+            v > 0 -> "열선 $v"
+            v < 0 -> "통풍 ${-v}"
+            else -> "끔"
+        }
+
         fun fromJson(s: String?): Preset? = try {
             val j = JSONObject(s ?: return null)
             Preset(
-                j.optString("temp"), j.optInt("defrost", -1), j.optInt("mirror", -1),
-                j.optInt("wheel", -1), j.optString("seat"), j.optString("duration"), j.optString("mode"),
+                temp = j.optString("temp"), defrost = j.optInt("defrost", -1), mirror = j.optInt("mirror", -1),
+                wheel = j.optInt("wheel", -1), duration = j.optString("duration"), mode = j.optString("mode"),
+                seatMode = j.optString("seatMode"), seatDriver = j.optInt("seatDriver"),
+                seatPassenger = j.optInt("seatPassenger"), seatRearL = j.optInt("seatRearL"), seatRearR = j.optInt("seatRearR"),
             )
         } catch (e: Exception) {
             null
@@ -223,7 +254,7 @@ class Prefs(context: Context) {
         const val CMD_SIGNAL = "signal"    // 퇴근 신호: 진동만, 전송 안 함
         const val CMD_READ_OPTIONS = "read_options"  // 기아 앱 선택지 읽기 (수신기 내부용)
 
-        val OPTION_ROWS = listOf("시동 유지 시간", "공조 모드", "시트 열선 / 통풍")
+        val OPTION_ROWS = listOf("공조 모드")
 
         val CAR_CMDS = setOf(CMD_UNLOCK, CMD_LOCK, CMD_START1, CMD_START2, CMD_START3, CMD_START_MAX, CMD_STOP)
 
@@ -247,9 +278,12 @@ class Prefs(context: Context) {
         }
 
         fun defaultPreset(n: Int) = when (n) {
-            1 -> Preset(temp = "High", defrost = 1, mirror = 1, wheel = 1, duration = "10분")
-            3 -> Preset(temp = "Low", defrost = 0, mirror = 0, wheel = 0, duration = "10분")
-            else -> Preset(temp = "25", defrost = 0, mirror = 0, wheel = 1, duration = "10분")
+            1 -> Preset(temp = "High", defrost = 1, mirror = 1, wheel = 1, duration = "10분",
+                seatMode = "custom", seatDriver = 3, seatPassenger = 0)
+            3 -> Preset(temp = "Low", defrost = 0, mirror = 0, wheel = 0, duration = "10분",
+                seatMode = "custom", seatDriver = -2, seatPassenger = 0)
+            else -> Preset(temp = "25", defrost = 0, mirror = 0, wheel = 1, duration = "10분",
+                seatMode = "custom", seatDriver = 2, seatPassenger = 0)
         }
 
         fun generatePairing(): String {

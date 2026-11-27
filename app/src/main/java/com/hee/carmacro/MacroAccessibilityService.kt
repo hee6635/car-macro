@@ -508,21 +508,22 @@ class MacroAccessibilityService : AccessibilityService() {
 
     /** 설정 화면에서 프리셋 적용. 설정 화면 안에서 바로 시동을 걸었으면 true */
     private fun applyPreset(p: Preset): Boolean {
-        val entry = findWithScroll { exact(it, "시동 / 공조 설정") }
+        val entry = findWithScroll { labelMatch(it, "시동 / 공조 설정") }
             ?: throw Fail(Protocol.CODE_FAIL, "'시동 / 공조 설정' 메뉴를 찾지 못했어요")
         click(clickableOf(entry) ?: entry)
-        waitNode(10) { visibleNodes().firstOrNull { exact(it, "희망 온도") } }
+        waitNode(10) { if (screenHas("희망 온도") && screenHas("저장")) true else null }
             ?: throw Fail(Protocol.CODE_FAIL, "시동/공조 설정 화면이 열리지 않았어요")
+        Thread.sleep(500)
         log("시동/공조 설정 적용")
         progress("공조 설정 여는 중")
 
         if (p.mode.isNotEmpty()) selectOption("공조 모드", p.mode)
-        if (p.duration.isNotEmpty()) selectOption("시동 유지 시간", p.duration)
+        if (p.duration.isNotEmpty()) setDuration(p.duration)
         if (p.temp.isNotEmpty()) setTemp(p.temp)
         setSwitch("앞유리 성에 제거", p.defrost)
         setSwitch("사이드 미러 + 뒷유리", p.mirror)
         setSwitch("핸들", p.wheel)
-        if (p.seat.isNotEmpty()) selectOption("시트 열선 / 통풍", p.seat)
+        setSeats(p)
 
         // 하단 버튼: 저장류면 저장, 시동 버튼이면 바로 시동
         val h = resources.displayMetrics.heightPixels
@@ -546,15 +547,15 @@ class MacroAccessibilityService : AccessibilityService() {
 
     /** '시동 / 공조 설정'의 하위 화면 선택지를 읽어서 저장 (차는 안 움직임) */
     private fun readOptions(prefs: Prefs): Result {
-        val entry = findWithScroll { exact(it, "시동 / 공조 설정") }
+        val entry = findWithScroll { labelMatch(it, "시동 / 공조 설정") }
             ?: throw Fail(Protocol.CODE_FAIL, "'시동 / 공조 설정' 메뉴를 찾지 못했어요")
         click(clickableOf(entry) ?: entry)
-        waitNode(10) { visibleNodes().firstOrNull { exact(it, "희망 온도") } }
+        waitNode(10) { if (screenHas("희망 온도")) true else null }
             ?: throw Fail(Protocol.CODE_FAIL, "시동/공조 설정 화면이 열리지 않았어요")
         val out = JSONObject()
         val found = mutableListOf<String>()
         for (rowLabel in Prefs.OPTION_ROWS) {
-            val row = findWithScroll { exact(it, rowLabel) } ?: continue
+            val row = findWithScroll { labelMatch(it, rowLabel) } ?: continue
             val rr = Rect().also { row.getBoundsInScreen(it) }
             val r = Rect()
             // 줄에 표시된 현재 값
@@ -573,12 +574,12 @@ class MacroAccessibilityService : AccessibilityService() {
             if (opts.isNotEmpty()) { out.put(rowLabel, org.json.JSONArray(opts)); found += "$rowLabel ${opts.size}개" }
             log("$rowLabel 선택지: $opts")
             performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(900)
-            if (visibleNodes().none { exact(it, "희망 온도") }) {
+            if (!screenHas("희망 온도")) {
                 // 뒤로 가기로 설정 화면까지 나갔으면 다시 들어감
                 if (ensureTile("시동/공조", 6) == null) openControlTab()
-                val e2 = findWithScroll { exact(it, "시동 / 공조 설정") } ?: break
+                val e2 = findWithScroll { labelMatch(it, "시동 / 공조 설정") } ?: break
                 click(clickableOf(e2) ?: e2)
-                waitNode(8) { visibleNodes().firstOrNull { exact(it, "희망 온도") } } ?: break
+                waitNode(8) { if (screenHas("희망 온도")) true else null } ?: break
             }
         }
         if (out.length() == 0) throw Fail(Protocol.CODE_FAIL, "선택지를 읽지 못했어요. 프리셋에서 직접 입력하세요.")
@@ -606,7 +607,7 @@ class MacroAccessibilityService : AccessibilityService() {
 
     private fun setTemp(target: String) {
         val goal = tempValue(target) ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 값 '$target' 형식 오류")
-        val row = findWithScroll { exact(it, "희망 온도") } ?: throw Fail(Protocol.CODE_FAIL, "'희망 온도'를 찾지 못했어요")
+        val row = findWithScroll { labelMatch(it, "희망 온도") } ?: throw Fail(Protocol.CODE_FAIL, "'희망 온도'를 찾지 못했어요")
         click(clickableOf(row) ?: row)
         if (waitNode(5) { visibleNodes().firstOrNull { exact(it, "적용") } } == null) {
             throw Fail(Protocol.CODE_FAIL, "희망 온도 창이 열리지 않았어요")
@@ -641,6 +642,105 @@ class MacroAccessibilityService : AccessibilityService() {
             Thread.sleep(250)
         }
         visibleNodes().firstOrNull { exact(it, "적용") }?.let { click(clickableOf(it) ?: it); Thread.sleep(800) }
+    }
+
+    /** 시동 유지 시간 창: 가운데 'N분'을 읽고 감소/증가로 맞춘 뒤 적용 (2~10분) */
+    private fun setDuration(target: String) {
+        val goal = (Regex("(\\d+)").find(target)?.value?.toIntOrNull()
+            ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 '$target' 형식 오류")).coerceIn(2, 10)
+        val row = findWithScroll { labelMatch(it, "시동 유지 시간") }
+            ?: throw Fail(Protocol.CODE_FAIL, "'시동 유지 시간'을 찾지 못했어요")
+        click(clickableOf(row) ?: row)
+        waitNode(5) { visibleNodes().firstOrNull { exact(it, "적용") } }
+            ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 창이 열리지 않았어요")
+        val seen = mutableListOf<Int>()
+        var last: Int? = null
+        var stuck = 0
+        for (i in 0 until 25) {
+            val (node, cur) = bigMinutes() ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 값을 읽지 못했어요")
+            if (seen.lastOrNull() != cur) seen += cur
+            progress("시동 유지 시간 " + seen.takeLast(8).joinToString(" → ") + "분" + if (cur == goal) " ✓" else "")
+            if (cur == goal) break
+            if (last == cur) { if (++stuck >= 3) throw Fail(Protocol.CODE_FAIL, "시동 유지 시간이 더 바뀌지 않아요 (현재 ${cur}분)") } else stuck = 0
+            last = cur
+            val (minus, plus) = plusMinusButtons(node)
+            val btn = (if (cur < goal) plus else minus) ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 +/- 버튼을 찾지 못했어요")
+            click(btn)
+            Thread.sleep(300)
+        }
+        visibleNodes().firstOrNull { exact(it, "적용") }?.let { click(clickableOf(it) ?: it); Thread.sleep(800) }
+        log("시동 유지 시간 = ${goal}분")
+    }
+
+    /** 창 가운데 큰 'N분' (아래 '2분', '10분' 눈금 글자보다 큰 것) */
+    private fun bigMinutes(): Pair<AccessibilityNodeInfo, Int>? {
+        val r = Rect()
+        return visibleNodes().mapNotNull { n ->
+            val t = n.text?.toString()?.trim() ?: return@mapNotNull null
+            val m = Regex("^(\\d+)\\s*분$").find(t) ?: return@mapNotNull null
+            n.getBoundsInScreen(r)
+            Triple(n, m.groupValues[1].toInt(), r.height())
+        }.maxByOrNull { it.third }?.let { it.first to it.second }
+    }
+
+    /**
+     * 시트 설정 창. 좌석별이면 [전체 끔]으로 0을 만든 뒤
+     * 앞좌석: 증가 = 열선(최대 3), 감소 = 통풍(최대 3) / 뒷좌석: 증가 = 열선(최대 2)
+     */
+    private fun setSeats(p: Preset) {
+        if (p.seatMode.isEmpty()) return
+        val row = findWithScroll { labelMatch(it, "시트 열선 / 통풍") }
+            ?: throw Fail(Protocol.CODE_FAIL, "'시트 열선 / 통풍'을 찾지 못했어요")
+        click(clickableOf(row) ?: row)
+        waitNode(6) { visibleNodes().firstOrNull { labelMatch(it, "시트 설정") } }
+            ?: throw Fail(Protocol.CODE_FAIL, "시트 설정 창이 열리지 않았어요")
+        Thread.sleep(400)
+        fun press(label: String) {
+            val n = waitNode(4) { visibleNodes().firstOrNull { exact(it, label) } }
+                ?: throw Fail(Protocol.CODE_FAIL, "시트 설정에서 '$label' 버튼을 찾지 못했어요")
+            click(clickableOf(n) ?: n); Thread.sleep(500)
+        }
+        when (p.seatMode) {
+            "off" -> { press("전체 끔"); progress("시트 전체 끔") }
+            "heat" -> { press("전체 열선"); progress("시트 전체 열선") }
+            "vent" -> { press("전체 통풍"); progress("시트 전체 통풍") }
+            "custom" -> {
+                press("전체 끔")
+                progress("시트 전체 끔 → 좌석별 설정")
+                for ((name, level) in p.seats()) {
+                    val front = name == "운전석" || name == "조수석"
+                    val lv = if (front) level.coerceIn(-3, 3) else level.coerceIn(0, 2)
+                    if (lv != 0) adjustSeat(name, lv, if (front) 3 else 2)
+                }
+            }
+        }
+        press("적용")
+        waitNode(5) { if (!screenHas("시트 설정")) true else null }
+        log("시트 설정 적용: ${p.seatSummary()}")
+    }
+
+    private fun adjustSeat(name: String, level: Int, max: Int) {
+        val label = visibleNodes().firstOrNull { exact(it, name) }
+            ?: throw Fail(Protocol.CODE_FAIL, "시트 설정에서 '$name'을 찾지 못했어요")
+        val lr = Rect().also { label.getBoundsInScreen(it) }
+        val want = if (level > 0) "증가" else "감소"
+        val r = Rect()
+        // 좌석 이름 바로 위 줄의 감소/증가 버튼 중 가장 가까운 것
+        val btn = visibleNodes().filter { n ->
+            val d = n.contentDescription?.toString() ?: ""
+            d.contains(want) && run { n.getBoundsInScreen(r); r.centerY() < lr.centerY() + 20 }
+        }.minByOrNull { n ->
+            n.getBoundsInScreen(r)
+            val dx = (r.centerX() - lr.centerX()).toDouble(); val dy = (r.centerY() - lr.centerY()).toDouble()
+            dx * dx + dy * dy
+        } ?: throw Fail(Protocol.CODE_FAIL, "시트 설정에서 '$name $want' 버튼을 찾지 못했어요")
+        val kind = if (level > 0) "열선" else "통풍"
+        val n = kotlin.math.abs(level)
+        for (i in 1..n) {
+            click(clickableOf(btn) ?: btn)
+            progress("시트: $name $kind " + "●".repeat(i) + "○".repeat(max - i))
+            Thread.sleep(450)
+        }
     }
 
     private fun fmtTemp(v: Double) = when {
@@ -684,13 +784,13 @@ class MacroAccessibilityService : AccessibilityService() {
     /** 라벨과 같은 줄의 스위치를 원하는 상태로 (want: 1 켬, 0 끔, -1 그대로) */
     private fun setSwitch(label: String, want: Int) {
         if (want < 0) return
-        val row = findWithScroll { exact(it, label) } ?: throw Fail(Protocol.CODE_FAIL, "'$label' 항목을 찾지 못했어요")
+        val row = findWithScroll { labelMatch(it, label) } ?: throw Fail(Protocol.CODE_FAIL, "'$label' 항목을 찾지 못했어요")
         val sw = switchFor(row) ?: throw Fail(Protocol.CODE_FAIL, "'$label' 스위치를 찾지 못했어요")
         val on = want == 1
         if (sw.isChecked == on) return
         click(clickableOf(sw) ?: sw)
         Thread.sleep(500)
-        val again = switchFor(visibleNodes().firstOrNull { exact(it, label) } ?: row)
+        val again = switchFor(visibleNodes().firstOrNull { labelMatch(it, label) } ?: row)
         log("$label → ${if (again?.isChecked == on) (if (on) "켬" else "끔") else "확인 불가"}")
         progress("$label ${if (on) "켬" else "끔"}")
     }
@@ -707,7 +807,7 @@ class MacroAccessibilityService : AccessibilityService() {
 
     /** 하위 화면에서 문구 고르기 (예: 시동 유지 시간 → "10분") */
     private fun selectOption(rowLabel: String, option: String) {
-        val row = findWithScroll { exact(it, rowLabel) } ?: throw Fail(Protocol.CODE_FAIL, "'$rowLabel' 항목을 찾지 못했어요")
+        val row = findWithScroll { labelMatch(it, rowLabel) } ?: throw Fail(Protocol.CODE_FAIL, "'$rowLabel' 항목을 찾지 못했어요")
         click(clickableOf(row) ?: row)
         Thread.sleep(1000)
         val opt = waitNode(6) {
@@ -720,7 +820,7 @@ class MacroAccessibilityService : AccessibilityService() {
         Thread.sleep(700)
         visibleNodes().firstOrNull { n -> listOf("적용", "확인", "완료", "저장").any { exact(n, it) } }
             ?.let { click(clickableOf(it) ?: it); Thread.sleep(700) }
-        if (visibleNodes().none { exact(it, "희망 온도") }) {
+        if (!screenHas("희망 온도")) {
             performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(800)
         }
         log("$rowLabel → $option")
@@ -729,7 +829,18 @@ class MacroAccessibilityService : AccessibilityService() {
 
     // ═════════════════════════ 접근성 도우미 ═════════════════════════
 
-    private fun norm(s: String) = s.replace(Regex("\\s+"), "").lowercase()
+    private fun norm(s: String) = s.replace(Regex("[\\s\\u00A0\\u200B\\u3000]+"), "").lowercase()
+
+    /** 항목 이름 찾기: 완전히 같거나, 그 이름으로 시작하는 짧은 글자 (예: '희망 온도 24.0°C') */
+    private fun labelMatch(n: AccessibilityNodeInfo, label: String): Boolean {
+        if (exact(n, label)) return true
+        val l = norm(label)
+        return listOfNotNull(n.text?.toString(), n.contentDescription?.toString()).any { t ->
+            val x = norm(t); x.startsWith(l) && x.length <= l.length + 14
+        }
+    }
+
+    private fun screenHas(word: String) = allTexts().any { norm(it).contains(norm(word)) }
 
     private fun nodeText(n: AccessibilityNodeInfo) = (n.text ?: n.contentDescription)?.toString()
 
