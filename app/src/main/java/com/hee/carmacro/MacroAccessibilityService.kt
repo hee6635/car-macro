@@ -623,7 +623,8 @@ class MacroAccessibilityService : AccessibilityService() {
         }
         while (true) {
             if (++tries > 60) throw Fail(Protocol.CODE_FAIL, "희망 온도를 맞추지 못했어요")
-            val (valueNode, cur) = bigTempValue() ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 값을 읽지 못했어요")
+            val st = readStepper { tempValue(it) } ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 값을 읽지 못했어요")
+            val cur = st.value
             show(cur, done = cur == goal)
             if (cur == goal) { log("희망 온도 = $target"); break }
             val prev = last
@@ -635,8 +636,7 @@ class MacroAccessibilityService : AccessibilityService() {
                 show(cur, done = true); log("희망 온도 ≈ ${fmtTemp(cur)}"); break
             }
             last = cur
-            val (minus, plus) = plusMinusButtons(valueNode)
-            val btn = (if (cur < goal) plus else minus)
+            val btn = (if (cur < goal) st.plus else st.minus)
                 ?: throw Fail(Protocol.CODE_FAIL, "희망 온도 +/- 버튼을 찾지 못했어요")
             click(btn)
             Thread.sleep(250)
@@ -657,14 +657,15 @@ class MacroAccessibilityService : AccessibilityService() {
         var last: Int? = null
         var stuck = 0
         for (i in 0 until 25) {
-            val (node, cur) = bigMinutes() ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 값을 읽지 못했어요")
+            val st = readStepper { t -> Regex("^(\\d+)\\s*분$").find(t)?.groupValues?.get(1)?.toIntOrNull() }
+                ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 값을 읽지 못했어요")
+            val cur = st.value
             if (seen.lastOrNull() != cur) seen += cur
             progress("시동 유지 시간 " + seen.takeLast(8).joinToString(" → ") + "분" + if (cur == goal) " ✓" else "")
             if (cur == goal) break
             if (last == cur) { if (++stuck >= 3) throw Fail(Protocol.CODE_FAIL, "시동 유지 시간이 더 바뀌지 않아요 (현재 ${cur}분)") } else stuck = 0
             last = cur
-            val (minus, plus) = plusMinusButtons(node)
-            val btn = (if (cur < goal) plus else minus) ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 +/- 버튼을 찾지 못했어요")
+            val btn = (if (cur < goal) st.plus else st.minus) ?: throw Fail(Protocol.CODE_FAIL, "시동 유지 시간 +/- 버튼을 찾지 못했어요")
             click(btn)
             Thread.sleep(300)
         }
@@ -672,15 +673,32 @@ class MacroAccessibilityService : AccessibilityService() {
         log("시동 유지 시간 = ${goal}분")
     }
 
-    /** 창 가운데 큰 'N분' (아래 '2분', '10분' 눈금 글자보다 큰 것) */
-    private fun bigMinutes(): Pair<AccessibilityNodeInfo, Int>? {
-        val r = Rect()
-        return visibleNodes().mapNotNull { n ->
-            val t = n.text?.toString()?.trim() ?: return@mapNotNull null
-            val m = Regex("^(\\d+)\\s*분$").find(t) ?: return@mapNotNull null
-            n.getBoundsInScreen(r)
-            Triple(n, m.groupValues[1].toInt(), r.height())
-        }.maxByOrNull { it.third }?.let { it.first to it.second }
+    private class Stepper<T>(val value: T, val minus: AccessibilityNodeInfo?, val plus: AccessibilityNodeInfo?)
+
+    /**
+     * −/+ 창 읽기: '감소'·'증가' 버튼을 먼저 찾고, 그 버튼들과 같은 줄에 있는 값을 읽음.
+     * 값은 글자(text)뿐 아니라 설명(contentDescription)에만 있을 수도 있음.
+     * 슬라이더 아래 눈금 글자('2분', '10분')는 줄이 달라서 무시됨.
+     */
+    private fun <T : Any> readStepper(parse: (String) -> T?): Stepper<T>? {
+        val nodes = visibleNodes()
+        fun desc(n: AccessibilityNodeInfo) = (n.contentDescription ?: "").toString().trim()
+        val minus = nodes.firstOrNull { desc(it) == "감소" } ?: nodes.firstOrNull { desc(it).contains("감소") }
+        val plus = nodes.firstOrNull { desc(it) == "증가" } ?: nodes.firstOrNull { desc(it).contains("증가") }
+        val cands = nodes.mapNotNull { n ->
+            val v = listOfNotNull(n.text?.toString(), n.contentDescription?.toString())
+                .firstNotNullOfOrNull { parse(it.trim()) } ?: return@mapNotNull null
+            Triple(n, v, Rect().also { n.getBoundsInScreen(it) })
+        }
+        if (cands.isEmpty()) return null
+        val ref = minus ?: plus
+        val best = if (ref != null) {
+            val rr = Rect().also { ref.getBoundsInScreen(it) }
+            cands.minByOrNull { kotlin.math.abs(it.third.centerY() - rr.centerY()) }!!
+        } else cands.maxByOrNull { it.third.height() }!!
+        if (minus != null || plus != null) return Stepper(best.second, minus, plus)
+        val (m, pl) = plusMinusButtons(best.first)
+        return Stepper(best.second, m, pl)
     }
 
     /**
