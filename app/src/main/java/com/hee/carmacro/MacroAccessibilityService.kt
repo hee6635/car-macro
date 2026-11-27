@@ -790,17 +790,51 @@ class MacroAccessibilityService : AccessibilityService() {
     /** 화면에 없으면 스크롤하면서 찾기 */
     private fun findWithScroll(pred: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         visibleNodes().firstOrNull(pred)?.let { return it }
-        val r = Rect()
-        val scroller = allNodes().filter { it.isScrollable }
-            .maxByOrNull { it.getBoundsInScreen(r); r.width() * r.height() } ?: return null
-        for (action in listOf(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
-            repeat(6) {
-                if (!scroller.performAction(action)) return@repeat
-                Thread.sleep(500)
+        // 목록에는 있는데 화면 밖이면 보이게 해 달라고 요청
+        fun showIfInTree(): AccessibilityNodeInfo? {
+            val n = allNodes().firstOrNull(pred) ?: return null
+            (clickableOf(n) ?: n).performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+            Thread.sleep(700)
+            return visibleNodes().firstOrNull(pred)
+        }
+        showIfInTree()?.let { return it }
+        // 아래로 → 위로. 스크롤 영역은 매번 새로 찾음 (기아 앱은 스크롤하면 화면 요소를 새로 만듦)
+        for (down in listOf(true, false)) {
+            for (i in 0 until 8) {
+                val before = snapshot()
+                val r = Rect()
+                val scroller = allNodes().filter { it.isScrollable }
+                    .maxByOrNull { it.getBoundsInScreen(r); r.width() * r.height() }
+                val ok = scroller?.performAction(
+                    if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                ) == true
+                Thread.sleep(600)
+                // 스크롤 명령이 안 먹으면 손가락으로 직접 밀기
+                if (!ok || snapshot() == before) { swipe(down); Thread.sleep(600) }
                 visibleNodes().firstOrNull(pred)?.let { return it }
+                showIfInTree()?.let { return it }
+                if (snapshot() == before) break   // 끝까지 감
             }
         }
         return null
+    }
+
+    /** 화면 가운데를 위/아래로 밀기 (down = 아래 내용 보기) */
+    private fun swipe(down: Boolean) {
+        val w = resources.displayMetrics.widthPixels.toFloat()
+        val h = resources.displayMetrics.heightPixels.toFloat()
+        val (y1, y2) = if (down) h * 0.68f to h * 0.32f else h * 0.32f to h * 0.68f
+        val path = Path().apply { moveTo(w / 2, y1); lineTo(w / 2, y2) }
+        val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 350)).build()
+        val latch = CountDownLatch(1)
+        main.post {
+            val sent = dispatchGesture(g, object : GestureResultCallback() {
+                override fun onCompleted(d: GestureDescription?) = latch.countDown()
+                override fun onCancelled(d: GestureDescription?) = latch.countDown()
+            }, null)
+            if (!sent) latch.countDown()
+        }
+        latch.await(3, TimeUnit.SECONDS)
     }
 
     private fun click(n: AccessibilityNodeInfo) {
